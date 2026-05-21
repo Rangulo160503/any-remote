@@ -97,8 +97,118 @@ def set_sender_bitrate(sender: RTCRtpSender, bitrate: int) -> bool:
     return False
 
 
+def tune_h264_sender(sender: RTCRtpSender, preset: QualityPreset) -> bool:
+    """Safari-friendly H.264: Baseline, annex-B, in-band SPS/PPS, short GOP."""
+    enc = getattr(sender, "_RTCRtpSender__encoder", None)
+    if enc is None:
+        return False
+    codec = getattr(enc, "codec", None)
+    if codec is None:
+        return False
+    opts = dict(codec.options or {})
+    opts.update(
+        {
+            "tune": "zerolatency",
+            "repeat-headers": "1",
+            "annexb": "1",
+            "keyint": str(max(30, preset.fps * 2)),
+        }
+    )
+    codec.options = opts
+    codec.profile = "baseline"
+    return True
+
+
+def request_sender_keyframe(sender: RTCRtpSender) -> None:
+    try:
+        sender._send_keyframe()
+    except Exception as exc:
+        logging.debug("keyframe request failed: %s", exc)
+
+
+def prefer_h264_in_answer_sdp(sdp: str) -> str:
+    """Reorder m=video payload types so H264 is listed before VP8 (Safari)."""
+    lines = sdp.replace("\r\n", "\n").split("\n")
+    h264_pts: list[str] = []
+    other_pts: list[str] = []
+    rtpmap: dict[str, str] = {}
+
+    for line in lines:
+        if line.startswith("a=rtpmap:"):
+            body = line[len("a=rtpmap:") :]
+            pt, rest = body.split(" ", 1)
+            rtpmap[pt] = rest.split("/")[0].upper()
+
+    out: list[str] = []
+    for line in lines:
+        if line.startswith("m=video "):
+            parts = line.split()
+            if len(parts) >= 4:
+                pts = parts[3:]
+                for pt in pts:
+                    codec = rtpmap.get(pt, "")
+                    if codec == "H264":
+                        h264_pts.append(pt)
+                    else:
+                        other_pts.append(pt)
+                if h264_pts:
+                    parts[3:] = h264_pts + other_pts
+                    line = " ".join(parts)
+        out.append(line)
+
+    body = "\r\n".join(out)
+    if body and not body.endswith("\r\n"):
+        body += "\r\n"
+    return body
+
+
+def cancel_ice_watch(session: PeerSession) -> None:
+    task = session._ice_watch_task
+    if task is not None:
+        task.cancel()
+        session._ice_watch_task = None
+
+
+async def schedule_ice_failed_cleanup(session: PeerSession, delay: float) -> None:
+    """Avoid tearing down Safari peers on transient ICE failed."""
+    cancel_ice_watch(session)
+
+    async def _watch() -> None:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        pc = session.pc
+        if session.id not in sessions:
+            return
+        if pc.iceConnectionState != "failed":
+            return
+        if pc.connectionState == "connected":
+            logging.info("peer %s ICE failed but PC connected — keeping", session.label)
+            return
+        await cleanup_peer(session, "ice-failed")
+
+    session._ice_watch_task = asyncio.create_task(_watch())
+
+
+async def prime_h264_keyframes(session: PeerSession) -> None:
+    """iOS often shows black video until an IDR frame arrives."""
+    if "H264" not in session.codec.upper():
+        return
+    for _ in range(10):
+        if session.id not in sessions:
+            return
+        if session.pc.connectionState not in ("connected", "connecting"):
+            return
+        senders = session.pc.getSenders()
+        if senders:
+            request_sender_keyframe(senders[0])
+        await asyncio.sleep(0.35)
+
+
 async def cleanup_peer(session: PeerSession, reason: str) -> None:
     """Close one peer only — never touches other sessions."""
+    cancel_ice_watch(session)
     peer_id = session.id
     pc = session.pc
 
@@ -130,12 +240,20 @@ def get_relayed_video_track() -> MediaStreamTrack:
 async def apply_peer_bitrate(session: PeerSession) -> None:
     for _ in range(30):
         senders = session.pc.getSenders()
-        if senders and set_sender_bitrate(senders[0], session.preset.bitrate):
+        if not senders:
+            await asyncio.sleep(0.1)
+            continue
+        sender = senders[0]
+        if set_sender_bitrate(sender, session.preset.bitrate):
+            tuned = tune_h264_sender(sender, session.preset)
             logging.info(
-                "peer %s bitrate %d",
+                "peer %s bitrate=%d h264_tune=%s codec=%s",
                 session.label,
                 session.preset.bitrate,
+                tuned,
+                session.codec,
             )
+            asyncio.create_task(prime_h264_keyframes(session))
             return
         await asyncio.sleep(0.1)
 
@@ -237,12 +355,13 @@ async def offer(request: web.Request) -> web.Response:
     remote = RTCSessionDescription(sdp=offer_sdp, type=params["type"])
 
     pc = RTCPeerConnection(configuration=ICE_CONFIGURATION)
-    session = PeerSession(pc=pc, preset=preset, mobile=mobile)
+    session = PeerSession(pc=pc, preset=preset, mobile=mobile, safari=safari)
 
     pcs.add(pc)
     sessions[session.id] = session
 
     h264_first = mobile or safari
+    ice_fail_delay = 12.0 if safari else 6.0
     logging.info(
         "peer %s created mobile=%s safari=%s quality=%s h264=%s",
         session.label,
@@ -258,19 +377,20 @@ async def offer(request: web.Request) -> web.Response:
         state = pc.connectionState
         logging.info("peer %s connectionState=%s", session.label, state)
         if state == "connected":
+            cancel_ice_watch(session)
             await apply_peer_bitrate(session)
         elif state in ("failed", "closed"):
+            cancel_ice_watch(session)
             await cleanup_peer(session, state)
 
     @pc.on("iceconnectionstatechange")
     async def on_iceconnectionstatechange() -> None:
-        logging.info(
-            "peer %s iceConnectionState=%s",
-            session.label,
-            pc.iceConnectionState,
-        )
-        if pc.iceConnectionState == "failed":
-            await cleanup_peer(session, "ice-failed")
+        ice = pc.iceConnectionState
+        logging.info("peer %s iceConnectionState=%s", session.label, ice)
+        if ice in ("connected", "completed"):
+            cancel_ice_watch(session)
+        elif ice == "failed":
+            await schedule_ice_failed_cleanup(session, ice_fail_delay)
 
     @pc.on("datachannel")
     def on_datachannel(channel) -> None:
@@ -306,6 +426,8 @@ async def offer(request: web.Request) -> web.Response:
     await pc.setLocalDescription(answer)
 
     answer_sdp = filter_sdp_candidates(pc.localDescription.sdp)
+    if h264_first:
+        answer_sdp = prefer_h264_in_answer_sdp(answer_sdp)
     negotiated = sdp_video_codec(answer_sdp)
     logging.info(
         "peer %s answer codec=%s negotiated=%s bitrate=%d fps=%d",
@@ -338,6 +460,7 @@ async def stats(_: web.Request) -> web.Response:
             {
                 "id": s.id,
                 "mobile": s.mobile,
+                "safari": s.safari,
                 "quality": s.preset.name,
                 "connection": s.pc.connectionState,
                 "ice": s.pc.iceConnectionState,

@@ -25,11 +25,18 @@ class PeerSession:
     pc: RTCPeerConnection
     preset: QualityPreset
     mobile: bool
+    safari: bool = False
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     video_track: MediaStreamTrack | None = None
     codec: str = "video/VP8"
+    _ice_watch_task: object | None = field(default=None, repr=False)
 
     @property
     def label(self) -> str:
-        kind = "mobile" if self.mobile else "desktop"
+        if self.safari:
+            kind = "safari"
+        elif self.mobile:
+            kind = "mobile"
+        else:
+            kind = "desktop"
         return f"{self.id} ({kind})"

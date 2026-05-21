@@ -69,7 +69,16 @@ python host.py --quality high     # 1280×720 @ 15 FPS, higher bitrate
 python host.py --quality low     # 854×480, lowest latency
 ```
 
-In the browser toolbar, pick **Low / Balanced / High** before **Connect** (best). Changing quality while connected updates capture; reconnect for full encoder bitrate.
+In the browser toolbar, pick **Mobile / Balanced / High / Ultra** before **Connect**. On iPhone/iPad, **Balanced** auto-downgrades to **Mobile** (H.264, 640×360).
+
+| Mode | Resolution | FPS | Bitrate (approx) |
+|------|------------|-----|------------------|
+| Mobile | 640×360 | 10 | 900 kbps |
+| Balanced | 960×540 | 12 | 3 Mbps |
+| High | 1280×720 | 15 | 5 Mbps |
+| Ultra | 1920×1080 | 15 | 7 Mbps |
+
+Changing quality while connected updates bitrate; higher modes may upgrade shared capture for all viewers.
 
 Listens on `0.0.0.0:8080` (all interfaces, including Tailscale).
 
@@ -117,7 +126,8 @@ If ICE still fails, symmetric NAT may require TURN (not included yet).
 | Connect fails | Browser console (F12); run host with `-v`; check for `typ srflx` in SDP (F12 → filtered in JS) |
 | `Remote candidate could not be resolved` | Ensure STUN + candidate filter deployed; restart host; hard-refresh browser (Ctrl+F5) |
 | ngrok works but no video | ngrok is signaling only; WebRTC needs UDP + srflx candidates from STUN |
-| Black video | Host running; user logged into desktop on CASA |
+| Black video (desktop) | Host running; user logged into desktop on CASA |
+| iPhone Safari black / DC closed | Hard-refresh; host `-v` should show `negotiated=H264`, keyframe prime, delayed ICE cleanup; tap **Connect** once (user gesture for `play()`); try **Mobile** quality |
 | Mouse does not move | Status shows DataChannel open; pyautogui works locally on CASA |
 | High latency (20s+) | Restart host; use default `540p` @ 12 FPS; hard-refresh browser; ensure old code not running |
 | Video stale | Fixed by latest-frame-only pipeline + `playoutDelayHint=0` in browser |

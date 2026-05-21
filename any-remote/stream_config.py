@@ -23,8 +23,8 @@ PRESETS: dict[str, QualityPreset] = {
         max_width=640,
         max_height=360,
         fps=10,
-        bitrate=700_000,
-        resample=Image.Resampling.BILINEAR,
+        bitrate=900_000,
+        resample=Image.Resampling.LANCZOS,
     ),
     "low": QualityPreset(
         name="low",
@@ -39,7 +39,7 @@ PRESETS: dict[str, QualityPreset] = {
         max_width=960,
         max_height=540,
         fps=12,
-        bitrate=2_500_000,
+        bitrate=3_000_000,
         resample=Image.Resampling.LANCZOS,
     ),
     "high": QualityPreset(
@@ -47,7 +47,7 @@ PRESETS: dict[str, QualityPreset] = {
         max_width=1280,
         max_height=720,
         fps=15,
-        bitrate=4_000_000,
+        bitrate=5_000_000,
         resample=Image.Resampling.LANCZOS,
     ),
     "ultra": QualityPreset(
@@ -55,7 +55,7 @@ PRESETS: dict[str, QualityPreset] = {
         max_width=1920,
         max_height=1080,
         fps=15,
-        bitrate=6_000_000,
+        bitrate=7_000_000,
         resample=Image.Resampling.LANCZOS,
     ),
 }

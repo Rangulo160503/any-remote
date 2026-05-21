@@ -122,8 +122,15 @@
             pointer-events: auto;
             outline: none;
             background: #000;
+        }
+
+        body.is-safari #video,
+        body.is-mobile #video {
             image-rendering: -webkit-optimize-contrast;
-            image-rendering: crisp-edges;
+        }
+
+        body:not(.is-mobile) #video {
+            image-rendering: auto;
         }
 
         /* Mobile layout */

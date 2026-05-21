@@ -28,15 +28,23 @@ const dcQueue = [];
 
 const platform = detectPlatform();
 
-const ICE_CONFIG = {
-    sdpSemantics: "unified-plan",
-    iceServers: [
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:stun1.l.google.com:19302" },
-    ],
-    bundlePolicy: "max-bundle",
-    rtcpMuxPolicy: "require",
-};
+const ICE_SERVERS = [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+];
+
+function buildPeerConnectionConfig() {
+    const cfg = {
+        iceServers: ICE_SERVERS,
+        bundlePolicy: "max-bundle",
+        rtcpMuxPolicy: "require",
+    };
+    // iOS Safari can misbehave with explicit sdpSemantics on newer WebKit.
+    if (!platform.ios) {
+        cfg.sdpSemantics = "unified-plan";
+    }
+    return cfg;
+}
 
 const USABLE_CANDIDATE_TYPES = new Set(["srflx", "relay", "prflx"]);
 
@@ -414,20 +422,67 @@ function configureLowLatencyReceiver(receiver) {
     } catch (_) { /* Safari may throw on unsupported hints */ }
 }
 
+function isSafariBaselineH264(codec) {
+    if (codec.mimeType !== "video/H264") return false;
+    const fmtp = (codec.sdpFmtpLine || "").toLowerCase();
+    if (!fmtp) return true;
+    return (
+        fmtp.includes("42e01f") ||
+        fmtp.includes("42001f") ||
+        fmtp.includes("profile-level-id=42e01f")
+    );
+}
+
 function preferReceiverH264(pc) {
     if (!platform.safari && !platform.ios) return;
     try {
         const caps = RTCRtpReceiver.getCapabilities("video");
-        const h264 = caps.codecs.filter((c) => c.mimeType === "video/H264");
-        const rest = caps.codecs.filter((c) => c.mimeType !== "video/H264");
-        const tr = pc.getTransceivers().find((t) => t.receiver);
-        if (tr && h264.length) {
-            tr.setCodecPreferences(h264.concat(rest));
-            log("receiver codec preference: H264 first");
+        const h264 = caps.codecs.filter(isSafariBaselineH264);
+        const h264Any = caps.codecs.filter((c) => c.mimeType === "video/H264");
+        const preferred = (h264.length ? h264 : h264Any).concat(
+            caps.codecs.filter((c) => c.mimeType !== "video/H264"),
+        );
+        const tr = pc.getTransceivers().find(
+            (t) => t.receiver && t.direction === "recvonly",
+        );
+        if (tr && preferred.length) {
+            tr.setCodecPreferences(preferred);
+            log("receiver codec preference: H264 first", h264.length || h264Any.length);
         }
     } catch (err) {
         log("preferReceiverH264 skipped", err.message || err);
     }
+}
+
+function attachVideoTrack(evt) {
+    const video = document.getElementById("video");
+    const track = evt.track;
+    track.enabled = true;
+
+    let stream = evt.streams && evt.streams[0];
+    if (!stream || !stream.getVideoTracks().length) {
+        stream = new MediaStream();
+        stream.addTrack(track);
+    }
+    if (video.srcObject !== stream) {
+        video.srcObject = stream;
+    }
+
+    configureLowLatencyReceiver(evt.receiver);
+    track.onmute = () => log("video track muted");
+    track.onunmute = () => {
+        log("video track unmuted");
+        playVideoElement();
+    };
+
+    const onMeta = () => {
+        log("video metadata", video.videoWidth, video.videoHeight);
+        applyViewerLayout();
+        playVideoElement();
+    };
+    video.addEventListener("loadedmetadata", onMeta, { once: true });
+    video.addEventListener("resize", () => applyViewerLayout());
+    playVideoElement();
 }
 
 function waitForIceGathering(peer, timeoutMs) {
@@ -507,8 +562,15 @@ function setupDataChannel(channel) {
 
     channel.addEventListener("close", () => {
         stats.dcState = "closed";
-        log("DataChannel onclose", "pc=", pc && pc.connectionState);
-        if (sessionActive && pc && pc.connectionState !== "connected") {
+        const video = document.getElementById("video");
+        const hasVideo = video && video.videoWidth > 0;
+        log("DataChannel onclose", "pc=", pc && pc.connectionState, "video=", hasVideo);
+        if (
+            sessionActive &&
+            pc &&
+            pc.connectionState !== "connected" &&
+            !hasVideo
+        ) {
             setStatus("DC closed", false);
         }
     });
@@ -580,7 +642,7 @@ function connectSession() {
     stats.dcState = "connecting";
     stats.iceState = "new";
 
-    pc = new RTCPeerConnection(ICE_CONFIG);
+    pc = new RTCPeerConnection(buildPeerConnectionConfig());
 
     pc.addEventListener("iceconnectionstatechange", () => {
         stats.iceState = pc.iceConnectionState;
@@ -622,25 +684,16 @@ function connectSession() {
 
     pc.addEventListener("track", (evt) => {
         if (evt.track.kind !== "video") return;
-        const video = document.getElementById("video");
-        video.srcObject = evt.streams[0];
-        configureLowLatencyReceiver(evt.receiver);
-        evt.track.onmute = () => log("video track muted");
-        evt.track.onunmute = () => log("video track unmuted");
-
-        const onMeta = () => {
-            log("video metadata", video.videoWidth, video.videoHeight);
-            applyViewerLayout();
-            playVideoElement();
-        };
-        video.addEventListener("loadedmetadata", onMeta, { once: true });
-        video.addEventListener("resize", () => applyViewerLayout());
-        playVideoElement();
+        attachVideoTrack(evt);
     });
 
     pc.addTransceiver("video", { direction: "recvonly" });
     preferReceiverH264(pc);
-    setupDataChannel(pc.createDataChannel("input", { ordered: true }));
+
+    const dcOpts = platform.ios
+        ? { ordered: false, maxRetransmits: 0 }
+        : { ordered: true };
+    setupDataChannel(pc.createDataChannel("input", dcOpts));
 
     const q = effectiveQuality();
 
@@ -675,9 +728,15 @@ function connectSession() {
             if (answer.peerId) log("assigned peerId", answer.peerId);
             if (answer.codec) {
                 stats.codec = answer.codec;
-                log("negotiated codec", answer.codec);
+                log("negotiated codec", answer.codec, "quality", answer.quality);
             }
-            return pc.setRemoteDescription(answer);
+            return pc.setRemoteDescription(answer).then(() => {
+                playVideoElement();
+                if (platform.ios) {
+                    setTimeout(playVideoElement, 400);
+                    setTimeout(playVideoElement, 1200);
+                }
+            });
         })
         .catch((err) => {
             console.error(err);
@@ -739,6 +798,13 @@ function startFpsMonitor() {
 
 document.getElementById("start").addEventListener("click", start);
 document.getElementById("stop").addEventListener("click", stop);
+
+document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && sessionActive) {
+        log("visibility visible — replay video");
+        playVideoElement();
+    }
+});
 
 initMobileDefaults();
 setupViewerControls();
