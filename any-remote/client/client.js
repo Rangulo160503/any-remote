@@ -610,6 +610,7 @@ function connectSession() {
                 qualityMode = answer.quality;
                 document.getElementById("quality-select").value = qualityMode;
             }
+            if (answer.peerId) log("assigned peerId", answer.peerId);
             return pc.setRemoteDescription(answer);
         })
         .catch((err) => {

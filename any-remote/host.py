@@ -1,5 +1,8 @@
 """
 PC CASA — controlled host.
+
+Each /offer creates an isolated RTCPeerConnection. Screen capture is shared
+via MediaRelay so multiple viewers do not fight over one VideoStreamTrack.
 """
 
 from __future__ import annotations
@@ -11,23 +14,39 @@ import logging
 import os
 import ssl
 import time
+from typing import Optional
 
 import pyautogui
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCRtpSender, RTCSessionDescription
+from aiortc.contrib.media import MediaRelay
 
 from ice_config import ICE_CONFIGURATION, filter_sdp_candidates
 from input_handler import bind_capture, handle_message
+from peer_session import PeerSession
 from screen_track import ScreenCapture, ScreenStreamTrack
-from stream_config import DEFAULT_QUALITY, get_preset
+from stream_config import DEFAULT_QUALITY, QualityPreset, get_preset
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CLIENT = os.path.join(ROOT, "client")
 
+# Active peer connections (one RTCPeerConnection per viewer).
 pcs: set[RTCPeerConnection] = set()
-capture: ScreenCapture | None = None
-current_preset = get_preset(DEFAULT_QUALITY)
-video_track: ScreenStreamTrack | None = None
+sessions: dict[str, PeerSession] = {}
+
+capture: Optional[ScreenCapture] = None
+shared_source: Optional[ScreenStreamTrack] = None
+media_relay: Optional[MediaRelay] = None
+
+
+def log_active_peers(reason: str = "") -> None:
+    labels = [s.label for s in sessions.values()]
+    logging.info(
+        "active peers: %d %s%s",
+        len(pcs),
+        labels,
+        f" ({reason})" if reason else "",
+    )
 
 
 def force_codec(pc: RTCPeerConnection, sender: RTCRtpSender, mime: str) -> None:
@@ -41,67 +60,144 @@ def set_sender_bitrate(sender: RTCRtpSender, bitrate: int) -> bool:
     enc = getattr(sender, "_RTCRtpSender__encoder", None)
     if enc is not None and hasattr(enc, "target_bitrate"):
         enc.target_bitrate = bitrate
-        logging.info("encoder bitrate -> %d bps", bitrate)
         return True
     return False
 
 
-async def index(_: web.Request) -> web.Response:
-    with open(os.path.join(CLIENT, "index.html"), encoding="utf-8") as f:
-        return web.Response(content_type="text/html", text=f.read())
+async def cleanup_peer(session: PeerSession, reason: str) -> None:
+    """Close one peer only — never touches other sessions."""
+    peer_id = session.id
+    pc = session.pc
+
+    sessions.pop(peer_id, None)
+    pcs.discard(pc)
+
+    logging.info("peer %s cleanup: %s", session.label, reason)
+
+    try:
+        await pc.close()
+    except Exception as exc:
+        logging.debug("peer %s close: %s", peer_id, exc)
+
+    log_active_peers("after cleanup")
 
 
-async def javascript(_: web.Request) -> web.Response:
-    with open(os.path.join(CLIENT, "client.js"), encoding="utf-8") as f:
-        return web.Response(content_type="application/javascript", text=f.read())
+def get_relayed_video_track() -> MediaStreamTrack:
+    """Single screen capture → MediaRelay → per-viewer proxy track."""
+    global shared_source, media_relay
+
+    assert capture is not None
+    if media_relay is None:
+        media_relay = MediaRelay()
+        shared_source = ScreenStreamTrack(capture)
+        logging.info("shared screen track + MediaRelay started")
+    return media_relay.subscribe(shared_source, buffered=False)
 
 
-def handle_quality_message(raw: str) -> None:
-    global current_preset
+async def apply_peer_bitrate(session: PeerSession) -> None:
+    for _ in range(30):
+        senders = session.pc.getSenders()
+        if senders and set_sender_bitrate(senders[0], session.preset.bitrate):
+            logging.info(
+                "peer %s bitrate %d",
+                session.label,
+                session.preset.bitrate,
+            )
+            return
+        await asyncio.sleep(0.1)
+
+
+def send_meta(channel, session: PeerSession) -> None:
+    assert capture is not None
+    geom = capture.get_geometry()
+    sw, sh = pyautogui.size()
+    channel.send(
+        json.dumps(
+            {
+                "t": "meta",
+                "peerId": session.id,
+                "streamW": geom.stream_width,
+                "streamH": geom.stream_height,
+                "monitorW": geom.monitor_width,
+                "monitorH": geom.monitor_height,
+                "screenW": sw,
+                "screenH": sh,
+                "quality": session.preset.name,
+                "fps": session.preset.fps,
+                "bitrate": session.preset.bitrate,
+            }
+        )
+    )
+
+
+def handle_peer_quality(raw: str, session: PeerSession) -> None:
     try:
         event = json.loads(raw)
     except json.JSONDecodeError:
         return
     if event.get("t") != "quality":
         return
+
     name = event.get("mode", DEFAULT_QUALITY)
-    preset = get_preset(name)
-    current_preset = preset
-    if capture is not None:
-        capture.apply_preset(preset)
+    session.preset = get_preset(name)
+    logging.info("peer %s quality -> %s", session.label, name)
+
+    senders = session.pc.getSenders()
+    if senders:
+        set_sender_bitrate(senders[0], session.preset.bitrate)
+
+
+async def index(_: web.Request) -> web.Response:
+    with open(os.path.join(CLIENT, "index.html"), encoding="utf-8") as f:
+        return web.Response(content_type="text/html", text=content)
+
+
+async def javascript(_: web.Request) -> web.Response:
+    with open(os.path.join(CLIENT, "client.js"), encoding="utf-8") as f:
+        return web.Response(content_type="application/javascript", text=content)
 
 
 async def offer(request: web.Request) -> web.Response:
-    global current_preset, video_track
-
     assert capture is not None
-    params = await request.json()
 
+    params = await request.json()
     quality = params.get("quality", DEFAULT_QUALITY)
-    if params.get("mobile"):
+    mobile = bool(params.get("mobile"))
+    if mobile:
         quality = "mobile"
-        logging.info("mobile client detected — using mobile preset")
-    current_preset = get_preset(quality)
-    capture.apply_preset(current_preset)
+
+    preset = get_preset(quality)
 
     offer_sdp = filter_sdp_candidates(params["sdp"])
-    offer = RTCSessionDescription(sdp=offer_sdp, type=params["type"])
+    remote = RTCSessionDescription(sdp=offer_sdp, type=params["type"])
 
     pc = RTCPeerConnection(configuration=ICE_CONFIGURATION)
+    session = PeerSession(pc=pc, preset=preset, mobile=mobile)
+
     pcs.add(pc)
+    sessions[session.id] = session
+
+    logging.info("peer %s created (mobile=%s quality=%s)", session.label, mobile, preset.name)
+    log_active_peers("new peer")
 
     @pc.on("connectionstatechange")
     async def on_connectionstatechange() -> None:
-        logging.info("connection state: %s", pc.connectionState)
-        if pc.connectionState == "connected":
-            for _ in range(20):
-                sender = pc.getSenders()[0] if pc.getSenders() else None
-                if sender and set_sender_bitrate(sender, current_preset.bitrate):
-                    break
-                await asyncio.sleep(0.1)
-        if pc.connectionState in ("failed", "closed"):
-            await pc.close()
-            pcs.discard(pc)
+        state = pc.connectionState
+        logging.info("peer %s connectionState=%s", session.label, state)
+        if state == "connected":
+            await apply_peer_bitrate(session)
+        elif state in ("failed", "closed"):
+            await cleanup_peer(session, state)
+
+    @pc.on("iceconnectionstatechange")
+    async def on_iceconnectionstatechange() -> None:
+        logging.info(
+            "peer %s iceConnectionState=%s",
+            session.label,
+            pc.iceConnectionState,
+        )
+        if pc.iceConnectionState == "failed":
+            await cleanup_peer(session, "ice-failed")
 
     @pc.on("datachannel")
     def on_datachannel(channel) -> None:
@@ -110,52 +206,35 @@ async def offer(request: web.Request) -> web.Response:
 
         @channel.on("open")
         def on_open() -> None:
-            logging.info("DataChannel open")
-            geom = capture.get_geometry()
-            sw, sh = pyautogui.size()
-            channel.send(
-                json.dumps(
-                    {
-                        "t": "meta",
-                        "streamW": geom.stream_width,
-                        "streamH": geom.stream_height,
-                        "monitorW": geom.monitor_width,
-                        "monitorH": geom.monitor_height,
-                        "screenW": sw,
-                        "screenH": sh,
-                        "quality": current_preset.name,
-                        "fps": current_preset.fps,
-                        "bitrate": current_preset.bitrate,
-                    }
-                )
-            )
+            logging.info("peer %s DataChannel open", session.label)
+            send_meta(channel, session)
 
         @channel.on("close")
         def on_close() -> None:
-            logging.info("DataChannel closed")
+            logging.info("peer %s DataChannel closed", session.label)
 
         @channel.on("message")
         def on_message(message) -> None:
             if not isinstance(message, str):
                 return
             if '"t":"quality"' in message or '"t": "quality"' in message:
-                handle_quality_message(message)
-                logging.info("quality change requested (capture updated)")
+                handle_peer_quality(message, session)
                 return
-            logging.debug("DataChannel <= %s", message[:100])
+            logging.debug("peer %s dc <= %s", session.label, message[:80])
             handle_message(message)
 
-    video_track = ScreenStreamTrack(capture)
-    sender = pc.addTrack(video_track)
-    codec = "video/H264" if params.get("mobile") else "video/VP8"
+    session.video_track = get_relayed_video_track()
+    sender = pc.addTrack(session.video_track)
+
+    codec = "video/H264" if mobile else "video/VP8"
     force_codec(pc, sender, codec)
 
-    await pc.setRemoteDescription(offer)
+    await pc.setRemoteDescription(remote)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
     answer_sdp = filter_sdp_candidates(pc.localDescription.sdp)
-    logging.info("answer ready quality=%s codec=%s", current_preset.name, codec)
+    logging.info("peer %s answer ready codec=%s", session.label, codec)
 
     return web.Response(
         content_type="application/json",
@@ -163,26 +242,38 @@ async def offer(request: web.Request) -> web.Response:
             {
                 "sdp": answer_sdp,
                 "type": pc.localDescription.type,
-                "quality": current_preset.name,
+                "quality": preset.name,
+                "peerId": session.id,
             }
         ),
     )
 
 
 async def stats(_: web.Request) -> web.Response:
-    """Optional host stats JSON for debugging."""
-    data = {"ts": time.time()}
+    data = {
+        "ts": time.time(),
+        "activePeers": len(pcs),
+        "peers": [
+            {
+                "id": s.id,
+                "mobile": s.mobile,
+                "quality": s.preset.name,
+                "connection": s.pc.connectionState,
+                "ice": s.pc.iceConnectionState,
+            }
+            for s in sessions.values()
+        ],
+    }
     if capture is not None:
         data["grabs"] = capture.stats_grabs
-    if video_track is not None:
-        data["sent"] = video_track.frames_sent
-        data["skipped"] = video_track.frames_skipped
+    if shared_source is not None:
+        data["framesSent"] = shared_source.frames_sent
     return web.json_response(data)
 
 
 async def on_shutdown(_: web.Application) -> None:
-    await asyncio.gather(*[pc.close() for pc in list(pcs)], return_exceptions=True)
-    pcs.clear()
+    for session in list(sessions.values()):
+        await cleanup_peer(session, "shutdown")
     if capture is not None:
         capture.stop()
 
@@ -193,11 +284,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Any-remote host")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument(
-        "--quality",
-        choices=["low", "balanced", "high"],
-        default=DEFAULT_QUALITY,
-    )
+    parser.add_argument("--quality", choices=["low", "balanced", "high", "mobile"], default=DEFAULT_QUALITY)
     parser.add_argument("--cert-file")
     parser.add_argument("--key-file")
     parser.add_argument("-v", "--verbose", action="count")
@@ -222,7 +309,7 @@ def main() -> None:
     app.router.add_get("/stats", stats)
     app.router.add_post("/offer", offer)
 
-    logging.info("Host :%s quality=%s (STUN + VP8)", args.port, preset.name)
+    logging.info("Host :%s capture=%s (multi-peer + MediaRelay)", args.port, preset.name)
     web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_context)
 
 
