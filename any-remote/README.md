@@ -7,6 +7,7 @@ Minimal remote desktop: **PC CASA** (host) streams its screen; **PC AFZ** (brows
 ```
 any-remote/
 ├── host.py              # Run on PC CASA — HTTP signaling + WebRTC
+├── stream_config.py     # Quality presets (low / balanced / high)
 ├── ice_config.py        # STUN + SDP candidate filtering (srflx only)
 ├── screen_track.py      # mss capture → aiortc VideoStreamTrack
 ├── input_handler.py     # DataChannel JSON → pyautogui
@@ -63,9 +64,12 @@ Example: `100.64.12.34`
 ```powershell
 cd c:\Users\joel\Documents\TCU\Any\any-remote
 .\.venv\Scripts\activate
-python host.py              # default: 960x540 @ 12 FPS, VP8 low-latency
-python host.py --resolution 720p --fps 15   # sharper, slightly higher latency
+python host.py                    # balanced: 960×540 @ 12 FPS
+python host.py --quality high     # 1280×720 @ 15 FPS, higher bitrate
+python host.py --quality low     # 854×480, lowest latency
 ```
+
+In the browser toolbar, pick **Low / Balanced / High** before **Connect** (best). Changing quality while connected updates capture; reconnect for full encoder bitrate.
 
 Listens on `0.0.0.0:8080` (all interfaces, including Tailscale).
 

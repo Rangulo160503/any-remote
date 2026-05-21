@@ -1,8 +1,5 @@
 """
 PC CASA — controlled host.
-
-Serves the browser UI + WebRTC signaling. Streams the desktop (mss → aiortc)
-and applies remote input from the DataChannel (pyautogui).
 """
 
 from __future__ import annotations
@@ -13,26 +10,24 @@ import json
 import logging
 import os
 import ssl
+import time
 
 import pyautogui
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCRtpSender, RTCSessionDescription
 
 from ice_config import ICE_CONFIGURATION, filter_sdp_candidates
-from screen_track import (
-    DEFAULT_FPS,
-    HD_MAX_HEIGHT,
-    HD_MAX_WIDTH,
-    ScreenCapture,
-    ScreenStreamTrack,
-)
 from input_handler import bind_capture, handle_message
+from screen_track import ScreenCapture, ScreenStreamTrack
+from stream_config import DEFAULT_QUALITY, get_preset
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CLIENT = os.path.join(ROOT, "client")
 
 pcs: set[RTCPeerConnection] = set()
 capture: ScreenCapture | None = None
+current_preset = get_preset(DEFAULT_QUALITY)
+video_track: ScreenStreamTrack | None = None
 
 
 def force_codec(pc: RTCPeerConnection, sender: RTCRtpSender, mime: str) -> None:
@@ -40,6 +35,15 @@ def force_codec(pc: RTCPeerConnection, sender: RTCRtpSender, mime: str) -> None:
     codecs = RTCRtpSender.getCapabilities(kind).codecs
     transceiver = next(t for t in pc.getTransceivers() if t.sender == sender)
     transceiver.setCodecPreferences([c for c in codecs if c.mimeType == mime])
+
+
+def set_sender_bitrate(sender: RTCRtpSender, bitrate: int) -> bool:
+    enc = getattr(sender, "_RTCRtpSender__encoder", None)
+    if enc is not None and hasattr(enc, "target_bitrate"):
+        enc.target_bitrate = bitrate
+        logging.info("encoder bitrate -> %d bps", bitrate)
+        return True
+    return False
 
 
 async def index(_: web.Request) -> web.Response:
@@ -52,9 +56,31 @@ async def javascript(_: web.Request) -> web.Response:
         return web.Response(content_type="application/javascript", text=f.read())
 
 
+def handle_quality_message(raw: str) -> None:
+    global current_preset
+    try:
+        event = json.loads(raw)
+    except json.JSONDecodeError:
+        return
+    if event.get("t") != "quality":
+        return
+    name = event.get("mode", DEFAULT_QUALITY)
+    preset = get_preset(name)
+    current_preset = preset
+    if capture is not None:
+        capture.apply_preset(preset)
+
+
 async def offer(request: web.Request) -> web.Response:
+    global current_preset, video_track
+
     assert capture is not None
     params = await request.json()
+
+    quality = params.get("quality", DEFAULT_QUALITY)
+    current_preset = get_preset(quality)
+    capture.apply_preset(current_preset)
+
     offer_sdp = filter_sdp_candidates(params["sdp"])
     offer = RTCSessionDescription(sdp=offer_sdp, type=params["type"])
 
@@ -64,6 +90,12 @@ async def offer(request: web.Request) -> web.Response:
     @pc.on("connectionstatechange")
     async def on_connectionstatechange() -> None:
         logging.info("connection state: %s", pc.connectionState)
+        if pc.connectionState == "connected":
+            for _ in range(20):
+                sender = pc.getSenders()[0] if pc.getSenders() else None
+                if sender and set_sender_bitrate(sender, current_preset.bitrate):
+                    break
+                await asyncio.sleep(0.1)
         if pc.connectionState in ("failed", "closed"):
             await pc.close()
             pcs.discard(pc)
@@ -75,7 +107,7 @@ async def offer(request: web.Request) -> web.Response:
 
         @channel.on("open")
         def on_open() -> None:
-            logging.info("DataChannel open: %s", channel.label)
+            logging.info("DataChannel open")
             geom = capture.get_geometry()
             sw, sh = pyautogui.size()
             channel.send(
@@ -88,6 +120,9 @@ async def offer(request: web.Request) -> web.Response:
                         "monitorH": geom.monitor_height,
                         "screenW": sw,
                         "screenH": sh,
+                        "quality": current_preset.name,
+                        "fps": current_preset.fps,
+                        "bitrate": current_preset.bitrate,
                     }
                 )
             )
@@ -98,12 +133,17 @@ async def offer(request: web.Request) -> web.Response:
 
         @channel.on("message")
         def on_message(message) -> None:
-            if isinstance(message, str):
-                logging.debug("DataChannel <= %s", message[:120])
-                handle_message(message)
+            if not isinstance(message, str):
+                return
+            if '"t":"quality"' in message or '"t": "quality"' in message:
+                handle_quality_message(message)
+                logging.info("quality change requested (capture updated)")
+                return
+            logging.debug("DataChannel <= %s", message[:100])
+            handle_message(message)
 
-    sender = pc.addTrack(ScreenStreamTrack(capture, fps=capture.fps))
-    # VP8: realtime deadline, lag-in-frames=0 (lower latency than default)
+    video_track = ScreenStreamTrack(capture)
+    sender = pc.addTrack(video_track)
     force_codec(pc, sender, "video/VP8")
 
     await pc.setRemoteDescription(offer)
@@ -111,12 +151,30 @@ async def offer(request: web.Request) -> web.Response:
     await pc.setLocalDescription(answer)
 
     answer_sdp = filter_sdp_candidates(pc.localDescription.sdp)
-    logging.info("ICE answer ready (VP8, low-latency capture)")
+    logging.info("answer ready quality=%s VP8", current_preset.name)
 
     return web.Response(
         content_type="application/json",
-        text=json.dumps({"sdp": answer_sdp, "type": pc.localDescription.type}),
+        text=json.dumps(
+            {
+                "sdp": answer_sdp,
+                "type": pc.localDescription.type,
+                "quality": current_preset.name,
+            }
+        ),
     )
+
+
+async def stats(_: web.Request) -> web.Response:
+    """Optional host stats JSON for debugging."""
+    data = {"ts": time.time()}
+    if capture is not None:
+        data["grabs"] = capture.stats_grabs
+        data["dropped"] = capture.stats_dropped
+    if video_track is not None:
+        data["sent"] = video_track.frames_sent
+        data["skipped"] = video_track.frames_skipped
+    return web.json_response(data)
 
 
 async def on_shutdown(_: web.Application) -> None:
@@ -129,35 +187,23 @@ async def on_shutdown(_: web.Application) -> None:
 def main() -> None:
     global capture
 
-    parser = argparse.ArgumentParser(description="Any-remote host (PC CASA)")
-    parser.add_argument("--host", default="0.0.0.0", help="HTTP bind address")
-    parser.add_argument("--port", type=int, default=8080, help="HTTP port")
+    parser = argparse.ArgumentParser(description="Any-remote host")
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8080)
     parser.add_argument(
-        "--resolution",
-        choices=["540p", "720p"],
-        default="540p",
-        help="540p=960x540 (default, low latency), 720p=1280x720",
+        "--quality",
+        choices=["low", "balanced", "high"],
+        default=DEFAULT_QUALITY,
     )
-    parser.add_argument(
-        "--fps",
-        type=int,
-        default=DEFAULT_FPS,
-        choices=[12, 15, 18],
-        help="Max capture/send FPS (default 12)",
-    )
-    parser.add_argument("--cert-file", help="SSL certificate (optional HTTPS)")
-    parser.add_argument("--key-file", help="SSL key file")
+    parser.add_argument("--cert-file")
+    parser.add_argument("--key-file")
     parser.add_argument("-v", "--verbose", action="count")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
-    if args.resolution == "720p":
-        max_w, max_h = HD_MAX_WIDTH, HD_MAX_HEIGHT
-    else:
-        max_w, max_h = 960, 540
-
-    capture = ScreenCapture(max_width=max_w, max_height=max_h, fps=args.fps)
+    preset = get_preset(args.quality)
+    capture = ScreenCapture(preset)
     capture.start()
     bind_capture(capture)
 
@@ -170,14 +216,10 @@ def main() -> None:
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
     app.router.add_get("/client.js", javascript)
+    app.router.add_get("/stats", stats)
     app.router.add_post("/offer", offer)
 
-    logging.info(
-        "Host ready port=%s %s @ %d FPS (STUN + VP8 realtime)",
-        args.port,
-        args.resolution,
-        args.fps,
-    )
+    logging.info("Host :%s quality=%s (STUN + VP8)", args.port, preset.name)
     web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_context)
 
 

@@ -6,201 +6,168 @@
     <title>Any-Remote</title>
     <style>
         * { box-sizing: border-box; }
+        html, body { height: 100%; margin: 0; }
         body {
-            font-family: system-ui, sans-serif;
-            margin: 0;
-            min-height: 100vh;
-            background: #0f1115;
+            font-family: "Segoe UI", system-ui, sans-serif;
+            background: #0c0e12;
             color: #e8eaed;
+            overflow: hidden;
         }
-        .page {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 16px;
-        }
-        h1 { font-size: 1.2rem; margin: 0 0 12px; font-weight: 600; }
 
-        .connect-bar {
+        #app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            width: 100%;
+        }
+
+        .toolbar {
+            flex: 0 0 auto;
             display: flex;
             flex-wrap: wrap;
             align-items: center;
-            gap: 10px;
-            margin-bottom: 12px;
-        }
-        button {
+            gap: 8px 14px;
             padding: 8px 14px;
-            cursor: pointer;
-            border: none;
-            border-radius: 6px;
-            background: #3b82f6;
-            color: #fff;
-            font-size: 13px;
-        }
-        button:hover { background: #2563eb; }
-        button.secondary { background: #334155; }
-        button.secondary:hover { background: #475569; }
-        #stop { background: #dc2626; }
-        #stop:hover { background: #b91c1c; }
-        #status {
-            font-size: 13px;
-            color: #94a3b8;
-            margin-left: 4px;
+            background: linear-gradient(180deg, #161b22 0%, #12161c 100%);
+            border-bottom: 1px solid #2d333b;
+            z-index: 10;
         }
 
-        .viewer-toolbar {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 12px 20px;
-            padding: 10px 14px;
-            background: #1a1f28;
-            border: 1px solid #2d3748;
-            border-radius: 8px 8px 0 0;
-        }
-        .viewer-toolbar label {
-            font-size: 12px;
-            color: #94a3b8;
+        .toolbar-group {
             display: flex;
             align-items: center;
             gap: 8px;
         }
-        #zoom-slider {
-            width: 140px;
-            vertical-align: middle;
-        }
-        #zoom-label {
-            min-width: 40px;
-            color: #e2e8f0;
-            font-variant-numeric: tabular-nums;
+
+        .toolbar-group + .toolbar-group {
+            padding-left: 14px;
+            border-left: 1px solid #30363d;
         }
 
-        .desktop-stage {
+        .toolbar label {
+            font-size: 11px;
+            color: #8b949e;
             display: flex;
-            flex-direction: column;
             align-items: center;
-            background: #0a0c10;
-            border: 1px solid #2d3748;
-            border-radius: 0 0 8px 8px;
-            padding: 20px;
-            min-height: 420px;
+            gap: 6px;
+        }
+
+        button, select {
+            font-size: 12px;
+            border-radius: 6px;
+            border: 1px solid #30363d;
+            background: #21262d;
+            color: #e6edf3;
+            padding: 6px 10px;
+            cursor: pointer;
+        }
+        button:hover, select:hover { background: #30363d; }
+        button.primary { background: #238636; border-color: #238636; }
+        button.primary:hover { background: #2ea043; }
+        button.danger { background: #da3633; border-color: #da3633; }
+        button.danger:hover { background: #f85149; }
+        button.active { outline: 2px solid #388bfd; }
+
+        #zoom-slider { width: 100px; vertical-align: middle; }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #6e7681;
+            display: inline-block;
+        }
+        .status-dot.live { background: #3fb950; }
+        #status-text { font-size: 12px; color: #8b949e; min-width: 80px; }
+
+        .info-line {
+            font-size: 11px;
+            font-family: ui-monospace, monospace;
+            color: #6e7681;
+            max-width: 280px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
 
         .viewport {
-            width: 100%;
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow: auto;
             display: flex;
             justify-content: center;
-            align-items: center;
-            overflow: auto;
-            max-height: calc(100vh - 200px);
+            align-items: flex-start;
+            padding: 16px;
+            background: #080a0d;
         }
 
-        #video-scaler {
-            transition: transform 0.15s ease-out;
-            transform-origin: center center;
-        }
-
-        #viewer {
-            position: relative;
+        #desktop-container {
+            flex: 0 0 auto;
             background: #000;
             border-radius: 4px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+            line-height: 0;
+            transition: width 0.12s ease-out, height 0.12s ease-out;
         }
 
         #video {
             display: block;
-            object-fit: contain;
+            width: 100%;
+            height: 100%;
+            object-fit: fill;
             cursor: crosshair;
             pointer-events: auto;
             outline: none;
-            vertical-align: top;
+            image-rendering: auto;
         }
 
-        #video.fit-mode {
-            width: 100%;
-            max-width: min(1280px, 100%);
-            max-height: 75vh;
-            height: auto;
-        }
-
-        #video.actual-mode {
-            width: auto;
-            height: auto;
-            max-width: none;
-            max-height: none;
-        }
-
-        #cursor-dot {
-            position: absolute;
-            width: 10px;
-            height: 10px;
-            margin: -5px 0 0 -5px;
-            border-radius: 50%;
-            background: rgba(255, 80, 80, 0.9);
-            border: 2px solid #fff;
-            pointer-events: none;
-            display: none;
-            z-index: 2;
-        }
-        #coord-debug {
-            position: absolute;
-            top: 6px;
-            left: 6px;
-            padding: 4px 8px;
-            font-size: 10px;
-            font-family: ui-monospace, monospace;
-            background: rgba(0, 0, 0, 0.7);
-            color: #a5f3fc;
-            pointer-events: none;
-            z-index: 2;
-            line-height: 1.35;
-            white-space: pre;
-            max-width: 90%;
-        }
-        .hint {
-            margin-top: 12px;
-            font-size: 12px;
-            color: #64748b;
-            text-align: center;
+        #video.crisp {
+            image-rendering: -webkit-optimize-contrast;
         }
     </style>
 </head>
 <body>
-    <div class="page">
-        <h1>Remote desktop</h1>
-
-        <div class="connect-bar">
-            <button id="start" onclick="start()">Connect</button>
-            <button id="stop" style="display:none" onclick="stop()">Disconnect</button>
-            <span id="status">Disconnected</span>
-        </div>
-
-        <div class="viewer-toolbar">
-            <label>
-                Zoom
-                <input type="range" id="zoom-slider" min="50" max="200" step="25" value="100"/>
-                <span id="zoom-label">100%</span>
-            </label>
-            <button type="button" class="secondary" id="btn-fit" onclick="setDisplayMode('fit')">Fit window</button>
-            <button type="button" class="secondary" id="btn-actual" onclick="setDisplayMode('actual')">Actual size</button>
-            <button type="button" class="secondary" id="btn-reset-zoom" onclick="resetZoom()">Reset zoom</button>
-        </div>
-
-        <div class="desktop-stage">
-            <div class="viewport">
-                <div id="video-scaler">
-                    <div id="viewer">
-                        <video id="video" class="fit-mode" autoplay playsinline muted tabindex="0"></video>
-                        <div id="cursor-dot"></div>
-                        <pre id="coord-debug">—</pre>
-                    </div>
-                </div>
+    <div id="app">
+        <header class="toolbar">
+            <div class="toolbar-group">
+                <button id="start" class="primary" type="button">Connect</button>
+                <button id="stop" class="danger" type="button" style="display:none">Disconnect</button>
+                <span class="status-dot" id="status-dot"></span>
+                <span id="status-text">Offline</span>
             </div>
-        </div>
 
-        <p class="hint">
-            Click the video for keyboard. Coordinates use the visible picture (letterbox ignored).
-            Lower latency: host runs at 960×540 @ 12 FPS by default.
-        </p>
+            <div class="toolbar-group">
+                <label>Zoom
+                    <input type="range" id="zoom-slider" min="50" max="200" step="25" value="100"/>
+                    <span id="zoom-label">100%</span>
+                </label>
+                <button type="button" id="btn-fit" class="active">Fit</button>
+                <button type="button" id="btn-actual">1:1</button>
+                <button type="button" id="btn-reset-zoom">Reset</button>
+            </div>
+
+            <div class="toolbar-group">
+                <label>Quality
+                    <select id="quality-select">
+                        <option value="low">Low</option>
+                        <option value="balanced" selected>Balanced</option>
+                        <option value="high">High</option>
+                    </select>
+                </label>
+            </div>
+
+            <div class="toolbar-group" style="margin-left:auto">
+                <span class="info-line" id="info-coords">coords —</span>
+                <span class="info-line" id="info-stream">stream —</span>
+                <span class="info-line" id="info-stats">fps —</span>
+            </div>
+        </header>
+
+        <main class="viewport" id="viewport">
+            <div id="desktop-container">
+                <video id="video" class="crisp" autoplay playsinline muted tabindex="0"></video>
+            </div>
+        </main>
     </div>
 
     <script src="client.js"></script>

@@ -1,5 +1,5 @@
 /**
- * Browser controller — low-latency video + accurate coords + zoom/fit UX.
+ * Any-Remote browser controller — real-size zoom, quality modes, low-latency video.
  */
 
 let pc = null;
@@ -10,10 +10,10 @@ let hostMeta = null;
 
 let zoomLevel = 100;
 let displayMode = "fit";
+let qualityMode = "balanced";
 
 const MOVE_INTERVAL_MS = 33;
-const DEBUG = false;
-const DEBUG_MOUSE = false;
+const DEBUG = true;
 
 const ICE_CONFIG = {
     sdpSemantics: "unified-plan",
@@ -42,40 +42,106 @@ const CODE_TO_KEY = {
     MetaRight: "command",
 };
 
+const stats = {
+    dcState: "closed",
+    lastFrameTs: 0,
+    fps: 0,
+    frameCount: 0,
+    lastCoords: null,
+};
+
 function log(...args) {
-    if (DEBUG) {
-        console.log("[any-remote]", ...args);
-    }
+    if (DEBUG) console.log("[any-remote]", ...args);
 }
 
-function setStatus(text) {
-    document.getElementById("status").textContent = text;
+function setStatus(text, live) {
+    document.getElementById("status-text").textContent = text;
+    document.getElementById("status-dot").classList.toggle("live", !!live);
+}
+
+function updateToolbarInfo(coords) {
+    const video = document.getElementById("video");
+    const coordsEl = document.getElementById("info-coords");
+    const streamEl = document.getElementById("info-stream");
+    const statsEl = document.getElementById("info-stats");
+
+    if (coords) {
+        stats.lastCoords = coords;
+        coordsEl.textContent = `xy ${(coords.x * 100).toFixed(1)}% ${(coords.y * 100).toFixed(1)}% · ${displayMode} · ${zoomLevel}%`;
+    }
+
+    const vw = video.videoWidth || 0;
+    const vh = video.videoHeight || 0;
+    const rect = video.getBoundingClientRect();
+    streamEl.textContent =
+        vw > 0
+            ? `src ${vw}×${vh} · view ${Math.round(rect.width)}×${Math.round(rect.height)} · ${qualityMode}`
+            : `stream · ${qualityMode}`;
+
+    statsEl.textContent = `dc ${stats.dcState} · ~${stats.fps} fps · q ${qualityMode}`;
+}
+
+/**
+ * Intrinsic stream size (pixels).
+ */
+function streamSize() {
+    const video = document.getElementById("video");
+    return {
+        w: video.videoWidth || hostMeta?.streamW || 960,
+        h: video.videoHeight || hostMeta?.streamH || 540,
+    };
+}
+
+/**
+ * Compute real pixel dimensions for container + video (no CSS transform).
+ */
+function layoutDimensions() {
+    const { w: sw, h: sh } = streamSize();
+    const viewport = document.getElementById("viewport");
+    const pad = 32;
+    const maxW = Math.max(200, viewport.clientWidth - pad);
+    const maxH = Math.max(150, viewport.clientHeight - pad);
+
+    if (displayMode === "fit") {
+        const scale = Math.min(maxW / sw, maxH / sh, 1);
+        return {
+            width: Math.max(1, Math.round(sw * scale)),
+            height: Math.max(1, Math.round(sh * scale)),
+        };
+    }
+
+    const z = zoomLevel / 100;
+    return {
+        width: Math.max(1, Math.round(sw * z)),
+        height: Math.max(1, Math.round(sh * z)),
+    };
 }
 
 function applyViewerLayout() {
-    const scaler = document.getElementById("video-scaler");
+    const container = document.getElementById("desktop-container");
     const video = document.getElementById("video");
-    const label = document.getElementById("zoom-label");
+    const { width, height } = layoutDimensions();
 
-    scaler.style.transform = `scale(${zoomLevel / 100})`;
-    label.textContent = `${zoomLevel}%`;
+    container.style.width = `${width}px`;
+    container.style.height = `${height}px`;
+    video.style.width = `${width}px`;
+    video.style.height = `${height}px`;
 
-    video.classList.remove("fit-mode", "actual-mode");
-    if (displayMode === "actual" && video.videoWidth > 0) {
-        video.classList.add("actual-mode");
-        video.style.width = `${video.videoWidth}px`;
-        video.style.height = `${video.videoHeight}px`;
-    } else {
-        video.classList.add("fit-mode");
-        video.style.width = "";
-        video.style.height = "";
-    }
+    document.getElementById("zoom-label").textContent = `${zoomLevel}%`;
+    document.getElementById("btn-fit").classList.toggle("active", displayMode === "fit");
+    document.getElementById("btn-actual").classList.toggle("active", displayMode === "actual");
+
+    log("layout", displayMode, width, height, "zoom", zoomLevel);
+    updateToolbarInfo(stats.lastCoords);
 }
 
 function setDisplayMode(mode) {
     displayMode = mode;
+    if (mode === "fit") {
+        zoomLevel = 100;
+        document.getElementById("zoom-slider").value = "100";
+    }
     applyViewerLayout();
-    log("display mode", mode);
 }
 
 function resetZoom() {
@@ -85,102 +151,51 @@ function resetZoom() {
 }
 
 function setupViewerControls() {
-    const slider = document.getElementById("zoom-slider");
-    slider.addEventListener("input", () => {
-        zoomLevel = parseInt(slider.value, 10);
+    document.getElementById("zoom-slider").addEventListener("input", (e) => {
+        zoomLevel = parseInt(e.target.value, 10);
+        if (displayMode === "fit") {
+            displayMode = "actual";
+            document.getElementById("btn-fit").classList.remove("active");
+            document.getElementById("btn-actual").classList.add("active");
+        }
         applyViewerLayout();
     });
+
+    document.getElementById("btn-fit").addEventListener("click", () => setDisplayMode("fit"));
+    document.getElementById("btn-actual").addEventListener("click", () => setDisplayMode("actual"));
+    document.getElementById("btn-reset-zoom").addEventListener("click", resetZoom);
+
+    document.getElementById("quality-select").addEventListener("change", (e) => {
+        qualityMode = e.target.value;
+        log("quality selected", qualityMode);
+        if (dc && dc.readyState === "open") {
+            dc.send(JSON.stringify({ t: "quality", mode: qualityMode }));
+            setStatus("Quality updated (reconnect for full effect)", true);
+        }
+    });
+
+    window.addEventListener("resize", () => applyViewerLayout());
     applyViewerLayout();
 }
 
 function sendInput(event) {
-    if (!dc || dc.readyState !== "open") {
-        return;
-    }
+    if (!dc || dc.readyState !== "open") return;
     dc.send(JSON.stringify(event));
-    if (DEBUG_MOUSE && (event.t === "move" || event.t === "click")) {
-        log("out", event.t, event);
-    }
-    if (DEBUG && (event.t === "keydown" || event.t === "keyup")) {
-        log("out", event.t, event.key);
-    }
 }
 
 /**
- * Normalized coords inside the painted video frame (object-fit: contain + zoom via getBoundingClientRect).
+ * Coords from getBoundingClientRect — video sized to exact aspect (object-fit: fill).
  */
 function videoCoords(event) {
     const video = document.getElementById("video");
     const rect = video.getBoundingClientRect();
-    const vw = video.videoWidth;
-    const vh = video.videoHeight;
+    if (rect.width <= 0 || rect.height <= 0) return null;
 
-    if (!vw || !vh || rect.width <= 0 || rect.height <= 0) {
-        return null;
-    }
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
 
-    const elementAspect = rect.width / rect.height;
-    const videoAspect = vw / vh;
-
-    let renderWidth;
-    let renderHeight;
-    let offsetX;
-    let offsetY;
-
-    if (elementAspect > videoAspect) {
-        renderHeight = rect.height;
-        renderWidth = rect.height * videoAspect;
-        offsetX = rect.left + (rect.width - renderWidth) / 2;
-        offsetY = rect.top;
-    } else {
-        renderWidth = rect.width;
-        renderHeight = rect.width / videoAspect;
-        offsetX = rect.left;
-        offsetY = rect.top + (rect.height - renderHeight) / 2;
-    }
-
-    const x = (event.clientX - offsetX) / renderWidth;
-    const y = (event.clientY - offsetY) / renderHeight;
-
-    if (x < 0 || x > 1 || y < 0 || y > 1) {
-        return null;
-    }
-
-    return {
-        x: Math.max(0, Math.min(1, x)),
-        y: Math.max(0, Math.min(1, y)),
-        renderWidth,
-        renderHeight,
-        offsetX,
-        offsetY,
-    };
-}
-
-function updateDebugOverlay(coords, event) {
-    const dot = document.getElementById("cursor-dot");
-    const debug = document.getElementById("coord-debug");
-
-    if (!coords) {
-        dot.style.display = "none";
-        return;
-    }
-
-    const viewer = document.getElementById("viewer");
-    const vr = viewer.getBoundingClientRect();
-    dot.style.display = "block";
-    dot.style.left = `${event.clientX - vr.left}px`;
-    dot.style.top = `${event.clientY - vr.top}px`;
-
-    const video = document.getElementById("video");
-    const lines = [
-        `norm: ${coords.x.toFixed(4)}, ${coords.y.toFixed(4)}`,
-        `zoom: ${zoomLevel}%  mode: ${displayMode}`,
-        `video: ${video.videoWidth}x${video.videoHeight}`,
-    ];
-    if (hostMeta) {
-        lines.push(`host: ${hostMeta.screenW}x${hostMeta.screenH}`);
-    }
-    debug.textContent = lines.join("\n");
+    return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
 }
 
 function codeToPyAutoKey(code) {
@@ -198,11 +213,12 @@ function setupInputHandlers() {
     video.addEventListener("click", () => {
         controlActive = true;
         video.focus();
+        log("keyboard focus on video");
     });
 
     video.addEventListener("mousemove", (event) => {
         const coords = videoCoords(event);
-        updateDebugOverlay(coords, event);
+        updateToolbarInfo(coords);
         if (!coords) return;
         const now = Date.now();
         if (now - lastMoveSent < MOVE_INTERVAL_MS) return;
@@ -231,7 +247,11 @@ function setupInputHandlers() {
         if (!key) return;
         event.preventDefault();
         event.stopPropagation();
-        sendInput(event.type === "keydown" ? { t: "keydown", key, code: event.code } : { t: "keyup", key, code: event.code });
+        sendInput(
+            event.type === "keydown"
+                ? { t: "keydown", key, code: event.code }
+                : { t: "keyup", key, code: event.code },
+        );
     };
 
     window.addEventListener("keydown", onKey, true);
@@ -240,20 +260,44 @@ function setupInputHandlers() {
 
 function configureLowLatencyReceiver(receiver) {
     if (!receiver) return;
-    if ("playoutDelayHint" in receiver) {
-        receiver.playoutDelayHint = 0;
-        log("playoutDelayHint = 0");
+    if ("playoutDelayHint" in receiver) receiver.playoutDelayHint = 0;
+    if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 0;
+    log("receiver low-latency hints set");
+}
+
+function startFpsMonitor() {
+    const video = document.getElementById("video");
+    let frames = 0;
+    let lastT = performance.now();
+
+    function tick(now, metadata) {
+        frames += 1;
+        if (now - lastT >= 1000) {
+            stats.fps = frames;
+            frames = 0;
+            lastT = now;
+            updateToolbarInfo(stats.lastCoords);
+            if (DEBUG) log("render fps ~", stats.fps);
+        }
+        if (video.srcObject) {
+            if (video.requestVideoFrameCallback) {
+                video.requestVideoFrameCallback(tick);
+            } else {
+                requestAnimationFrame((t) => tick(t, null));
+            }
+        }
     }
-    if ("jitterBufferTarget" in receiver) {
-        receiver.jitterBufferTarget = 0;
-        log("jitterBufferTarget = 0");
+
+    if (video.requestVideoFrameCallback) {
+        video.requestVideoFrameCallback(tick);
+    } else {
+        setInterval(() => updateToolbarInfo(stats.lastCoords), 1000);
     }
 }
 
 function parseCandidate(line) {
     if (!line.startsWith("a=candidate:")) return null;
     const parts = line.slice("a=candidate:".length).split(" ");
-    if (parts.length < 8) return null;
     const typIndex = parts.indexOf("typ");
     if (typIndex < 0) return null;
     return { ip: parts[4], typ: parts[typIndex + 1] };
@@ -264,8 +308,7 @@ function isUnusableAddress(ip) {
     if (["127.0.0.1", "0.0.0.0", "::1", "::"].includes(ip)) return true;
     if (ip.startsWith("10.") || ip.startsWith("192.168.")) return true;
     if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
-    if (ip.startsWith("127.") || ip.startsWith("169.254.")) return true;
-    return false;
+    return ip.startsWith("127.") || ip.startsWith("169.254.");
 }
 
 function keepCandidateLine(line) {
@@ -290,21 +333,33 @@ function setupDataChannel(channel) {
     dc = channel;
 
     channel.addEventListener("open", () => {
+        stats.dcState = "open";
         log("DataChannel onopen");
-        setStatus("Connected — click video for keyboard");
+        setStatus("Connected", true);
+        dc.send(JSON.stringify({ t: "quality", mode: qualityMode }));
     });
+
     channel.addEventListener("close", () => {
+        stats.dcState = "closed";
         log("DataChannel onclose");
-        setStatus("Disconnected");
+        setStatus("Disconnected", false);
     });
-    channel.addEventListener("error", (err) => {
-        console.error("[any-remote] DataChannel onerror", err);
+
+    channel.addEventListener("error", (e) => {
+        stats.dcState = "error";
+        console.error("[any-remote] DataChannel onerror", e);
     });
+
     channel.addEventListener("message", (ev) => {
         try {
             const msg = JSON.parse(ev.data);
             if (msg.t === "meta") {
                 hostMeta = msg;
+                if (msg.quality) {
+                    qualityMode = msg.quality;
+                    document.getElementById("quality-select").value = qualityMode;
+                }
+                log("meta", msg);
                 applyViewerLayout();
             }
         } catch (_) { /* ignore */ }
@@ -334,32 +389,45 @@ function negotiate() {
                     pc.addEventListener("icegatheringstatechange", check);
                 }),
         )
-        .then(() => {
-            const offer = pc.localDescription;
-            return fetch("/offer", {
+        .then(() =>
+            fetch("/offer", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ sdp: filterSdpCandidates(offer.sdp), type: offer.type }),
-            });
-        })
+                body: JSON.stringify({
+                    sdp: filterSdpCandidates(pc.localDescription.sdp),
+                    type: pc.localDescription.type,
+                    quality: qualityMode,
+                }),
+            }),
+        )
         .then((r) => {
-            if (!r.ok) throw new Error("Signaling failed: " + r.status);
+            if (!r.ok) throw new Error("Signaling " + r.status);
             return r.json();
         })
         .then((answer) => {
             answer.sdp = filterSdpCandidates(answer.sdp);
+            if (answer.quality) {
+                qualityMode = answer.quality;
+                document.getElementById("quality-select").value = qualityMode;
+            }
             return pc.setRemoteDescription(answer);
         })
         .catch((err) => {
             console.error(err);
             alert("Connection failed: " + err);
-            setStatus("Error");
+            setStatus("Error", false);
         });
 }
 
 function start() {
     controlActive = false;
     hostMeta = null;
+    qualityMode = document.getElementById("quality-select").value;
+
+    document.getElementById("start").style.display = "none";
+    document.getElementById("stop").style.display = "inline-block";
+    setStatus("Connecting…", false);
+    stats.dcState = "connecting";
 
     pc = new RTCPeerConnection(ICE_CONFIG);
 
@@ -369,28 +437,24 @@ function start() {
         video.srcObject = evt.streams[0];
         configureLowLatencyReceiver(evt.receiver);
 
-        video.addEventListener(
-            "loadedmetadata",
-            () => {
-                log("video", video.videoWidth, "x", video.videoHeight);
-                applyViewerLayout();
-            },
-            { once: true },
-        );
+        const onMeta = () => {
+            log("video metadata", video.videoWidth, video.videoHeight);
+            applyViewerLayout();
+            startFpsMonitor();
+        };
+        video.addEventListener("loadedmetadata", onMeta, { once: true });
+        video.addEventListener("resize", () => applyViewerLayout());
     });
 
     pc.addEventListener("connectionstatechange", () => {
         log("connectionState", pc.connectionState);
         if (pc.connectionState === "connected") {
-            setStatus("Live — click video to type");
-        } else {
-            setStatus("WebRTC: " + pc.connectionState);
+            setStatus("Live", true);
+        } else if (pc.connectionState === "failed") {
+            setStatus("Failed", false);
         }
     });
 
-    document.getElementById("start").style.display = "none";
-    document.getElementById("stop").style.display = "inline-block";
-    setStatus("Connecting…");
     negotiate();
 }
 
@@ -398,7 +462,9 @@ function stop() {
     controlActive = false;
     document.getElementById("stop").style.display = "none";
     document.getElementById("start").style.display = "inline-block";
-    setStatus("Disconnected");
+    setStatus("Offline", false);
+    stats.dcState = "closed";
+    stats.fps = 0;
 
     if (dc) {
         dc.close();
@@ -409,11 +475,15 @@ function stop() {
             pc.close();
             pc = null;
         }
-        document.getElementById("video").srcObject = null;
-        document.getElementById("cursor-dot").style.display = "none";
-        document.getElementById("coord-debug").textContent = "—";
+        const video = document.getElementById("video");
+        video.srcObject = null;
+        applyViewerLayout();
+        updateToolbarInfo(null);
     }, 200);
 }
+
+document.getElementById("start").addEventListener("click", start);
+document.getElementById("stop").addEventListener("click", stop);
 
 setupViewerControls();
 setupInputHandlers();
