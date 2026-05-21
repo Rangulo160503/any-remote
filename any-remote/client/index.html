@@ -110,6 +110,18 @@
             transition: width 0.12s ease-out, height 0.12s ease-out;
         }
 
+        #desktop-container,
+        #video {
+            user-select: none;
+            -webkit-user-select: none;
+            -webkit-user-drag: none;
+        }
+
+        body.remote-drag {
+            user-select: none;
+            cursor: crosshair;
+        }
+
         #video {
             display: block;
             width: 100%;

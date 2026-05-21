@@ -13,7 +13,15 @@ let displayMode = "fit";
 let qualityMode = "balanced";
 
 const MOVE_INTERVAL_MS = 33;
+const DRAG_MOVE_INTERVAL_MS = 16;
 const DEBUG = true;
+
+const BUTTON_NAMES = { 0: "left", 1: "middle", 2: "right" };
+
+const dragState = {
+    active: false,
+    button: null,
+};
 
 const ICE_CONFIG = {
     sdpSemantics: "unified-plan",
@@ -67,8 +75,12 @@ function updateToolbarInfo(coords) {
 
     if (coords) {
         stats.lastCoords = coords;
-        coordsEl.textContent = `xy ${(coords.x * 100).toFixed(1)}% ${(coords.y * 100).toFixed(1)}% · ${displayMode} · ${zoomLevel}%`;
     }
+    const drag = dragState.active ? ` · drag:${dragState.button}` : "";
+    const xy = coords
+        ? `xy ${(coords.x * 100).toFixed(1)}% ${(coords.y * 100).toFixed(1)}%`
+        : "xy —";
+    coordsEl.textContent = `${xy} · ${displayMode} · ${zoomLevel}%${drag}`;
 
     const vw = video.videoWidth || 0;
     const vh = video.videoHeight || 0;
@@ -207,38 +219,97 @@ function codeToPyAutoKey(code) {
     return null;
 }
 
+function eventButton(event) {
+    return BUTTON_NAMES[event.button] || "left";
+}
+
+function setRemoteDrag(active) {
+    dragState.active = active;
+    document.body.classList.toggle("remote-drag", active);
+}
+
+function endDrag(event) {
+    if (!dragState.active) return;
+
+    const coords = (event && videoCoords(event)) || stats.lastCoords;
+    const button = dragState.button || "left";
+
+    if (coords) {
+        log("mouseUp", button, coords.x.toFixed(4), coords.y.toFixed(4));
+        sendInput({ t: "up", button, x: coords.x, y: coords.y });
+    } else {
+        log("mouseUp", button, "(no coords)");
+        sendInput({ t: "up", button, x: 0, y: 0 });
+    }
+
+    setRemoteDrag(false);
+    dragState.button = null;
+}
+
 function setupInputHandlers() {
     const video = document.getElementById("video");
 
-    video.addEventListener("click", () => {
+    video.addEventListener("dragstart", (e) => e.preventDefault());
+    video.addEventListener("selectstart", (e) => e.preventDefault());
+
+    video.addEventListener("mousedown", (event) => {
+        event.preventDefault();
         controlActive = true;
         video.focus();
-        log("keyboard focus on video");
+
+        const coords = videoCoords(event);
+        if (!coords) return;
+
+        const button = eventButton(event);
+        setRemoteDrag(true);
+        dragState.button = button;
+        lastMoveSent = 0;
+
+        log("mouseDown", button, coords.x.toFixed(4), coords.y.toFixed(4));
+        sendInput({ t: "down", button, x: coords.x, y: coords.y });
     });
 
     video.addEventListener("mousemove", (event) => {
         const coords = videoCoords(event);
         updateToolbarInfo(coords);
         if (!coords) return;
+
+        const interval = dragState.active ? DRAG_MOVE_INTERVAL_MS : MOVE_INTERVAL_MS;
         const now = Date.now();
-        if (now - lastMoveSent < MOVE_INTERVAL_MS) return;
+        if (now - lastMoveSent < interval) return;
         lastMoveSent = now;
+
+        if (dragState.active && DEBUG) {
+            log("drag move", coords.x.toFixed(4), coords.y.toFixed(4), dragState.button);
+        }
         sendInput({ t: "move", x: coords.x, y: coords.y });
     });
 
-    video.addEventListener("mousedown", (event) => {
-        if (event.button !== 0) return;
+    video.addEventListener("mouseup", (event) => {
         event.preventDefault();
-        const coords = videoCoords(event);
-        if (!coords) return;
-        sendInput({ t: "click", x: coords.x, y: coords.y, button: "left" });
+        endDrag(event);
+    });
+
+    video.addEventListener("mouseleave", (event) => {
+        if (dragState.active) {
+            const coords = videoCoords(event) || stats.lastCoords;
+            if (coords) {
+                sendInput({ t: "move", x: coords.x, y: coords.y });
+            }
+        }
     });
 
     video.addEventListener("contextmenu", (event) => {
         event.preventDefault();
-        const coords = videoCoords(event);
-        if (!coords) return;
-        sendInput({ t: "click", x: coords.x, y: coords.y, button: "right" });
+    });
+
+    window.addEventListener("mouseup", (event) => {
+        if (!dragState.active) return;
+        endDrag(event);
+    });
+
+    window.addEventListener("blur", () => {
+        if (dragState.active) endDrag(null);
     });
 
     const onKey = (event) => {
@@ -460,6 +531,9 @@ function start() {
 
 function stop() {
     controlActive = false;
+    if (dragState.active) {
+        endDrag(null);
+    }
     document.getElementById("stop").style.display = "none";
     document.getElementById("start").style.display = "inline-block";
     setStatus("Offline", false);
