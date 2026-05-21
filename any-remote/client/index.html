@@ -2,13 +2,15 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8"/>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"/>
+    <meta name="apple-mobile-web-app-capable" content="yes"/>
+    <meta name="format-detection" content="telephone=no"/>
     <title>Any-Remote</title>
     <style>
-        * { box-sizing: border-box; }
+        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
         html, body { height: 100%; margin: 0; }
         body {
-            font-family: "Segoe UI", system-ui, sans-serif;
+            font-family: system-ui, -apple-system, sans-serif;
             background: #0c0e12;
             color: #e8eaed;
             overflow: hidden;
@@ -18,6 +20,7 @@
             display: flex;
             flex-direction: column;
             height: 100vh;
+            height: 100dvh;
             width: 100%;
         }
 
@@ -26,9 +29,9 @@
             display: flex;
             flex-wrap: wrap;
             align-items: center;
-            gap: 8px 14px;
-            padding: 8px 14px;
-            background: linear-gradient(180deg, #161b22 0%, #12161c 100%);
+            gap: 6px 10px;
+            padding: 8px 10px;
+            background: #161b22;
             border-bottom: 1px solid #2d333b;
             z-index: 10;
         }
@@ -36,11 +39,12 @@
         .toolbar-group {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
+            flex-wrap: wrap;
         }
 
         .toolbar-group + .toolbar-group {
-            padding-left: 14px;
+            padding-left: 10px;
             border-left: 1px solid #30363d;
         }
 
@@ -49,7 +53,7 @@
             color: #8b949e;
             display: flex;
             align-items: center;
-            gap: 6px;
+            gap: 4px;
         }
 
         button, select {
@@ -58,46 +62,40 @@
             border: 1px solid #30363d;
             background: #21262d;
             color: #e6edf3;
-            padding: 6px 10px;
+            padding: 8px 10px;
             cursor: pointer;
+            touch-action: manipulation;
         }
-        button:hover, select:hover { background: #30363d; }
         button.primary { background: #238636; border-color: #238636; }
-        button.primary:hover { background: #2ea043; }
         button.danger { background: #da3633; border-color: #da3633; }
-        button.danger:hover { background: #f85149; }
         button.active { outline: 2px solid #388bfd; }
 
-        #zoom-slider { width: 100px; vertical-align: middle; }
+        #zoom-slider { width: 72px; }
 
         .status-dot {
             width: 8px;
             height: 8px;
             border-radius: 50%;
             background: #6e7681;
-            display: inline-block;
         }
         .status-dot.live { background: #3fb950; }
-        #status-text { font-size: 12px; color: #8b949e; min-width: 80px; }
+        #status-text { font-size: 12px; color: #8b949e; }
 
         .info-line {
-            font-size: 11px;
+            font-size: 10px;
             font-family: ui-monospace, monospace;
             color: #6e7681;
-            max-width: 280px;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
         }
 
         .viewport {
             flex: 1 1 auto;
             min-height: 0;
             overflow: auto;
+            -webkit-overflow-scrolling: touch;
             display: flex;
             justify-content: center;
             align-items: flex-start;
-            padding: 16px;
+            padding: 8px;
             background: #080a0d;
         }
 
@@ -105,36 +103,44 @@
             flex: 0 0 auto;
             background: #000;
             border-radius: 4px;
-            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
             line-height: 0;
-            transition: width 0.12s ease-out, height 0.12s ease-out;
         }
 
-        #desktop-container,
-        #video {
+        #desktop-container, #video {
             user-select: none;
             -webkit-user-select: none;
             -webkit-user-drag: none;
+            touch-action: none;
         }
 
-        body.remote-drag {
-            user-select: none;
-            cursor: crosshair;
-        }
+        body.remote-drag { user-select: none; }
 
         #video {
             display: block;
-            width: 100%;
-            height: 100%;
             object-fit: fill;
             cursor: crosshair;
             pointer-events: auto;
             outline: none;
-            image-rendering: auto;
+            background: #000;
         }
 
-        #video.crisp {
-            image-rendering: -webkit-optimize-contrast;
+        /* Mobile layout */
+        body.is-mobile .toolbar-group + .toolbar-group {
+            border-left: none;
+            padding-left: 0;
+        }
+        body.is-mobile .toolbar {
+            padding: 6px 8px;
+        }
+        body.is-mobile .info-line.hide-mobile {
+            display: none;
+        }
+        body.is-mobile #btn-actual,
+        body.is-mobile #btn-reset-zoom {
+            display: none;
+        }
+        body.is-mobile .viewport {
+            padding: 4px;
         }
     </style>
 </head>
@@ -161,6 +167,7 @@
             <div class="toolbar-group">
                 <label>Quality
                     <select id="quality-select">
+                        <option value="mobile">Mobile</option>
                         <option value="low">Low</option>
                         <option value="balanced" selected>Balanced</option>
                         <option value="high">High</option>
@@ -168,16 +175,24 @@
                 </label>
             </div>
 
-            <div class="toolbar-group" style="margin-left:auto">
-                <span class="info-line" id="info-coords">coords —</span>
-                <span class="info-line" id="info-stream">stream —</span>
-                <span class="info-line" id="info-stats">fps —</span>
+            <div class="toolbar-group">
+                <span class="info-line" id="info-coords">—</span>
+                <span class="info-line hide-mobile" id="info-stream">—</span>
+                <span class="info-line" id="info-stats">—</span>
             </div>
         </header>
 
         <main class="viewport" id="viewport">
             <div id="desktop-container">
-                <video id="video" class="crisp" autoplay playsinline muted tabindex="0"></video>
+                <video
+                    id="video"
+                    autoplay
+                    playsinline
+                    webkit-playsinline
+                    muted
+                    disablePictureInPicture
+                    tabindex="0"
+                ></video>
             </div>
         </main>
     </div>

@@ -1,5 +1,5 @@
 /**
- * Any-Remote browser controller — real-size zoom, quality modes, low-latency video.
+ * Any-Remote — desktop + mobile (iPhone Safari / Android Chrome).
  */
 
 let pc = null;
@@ -7,6 +7,9 @@ let dc = null;
 let lastMoveSent = 0;
 let controlActive = false;
 let hostMeta = null;
+let sessionActive = false;
+let reconnectTimer = null;
+let reconnectAttempts = 0;
 
 let zoomLevel = 100;
 let displayMode = "fit";
@@ -14,18 +17,25 @@ let qualityMode = "balanced";
 
 const MOVE_INTERVAL_MS = 33;
 const DRAG_MOVE_INTERVAL_MS = 16;
+const ICE_GATHER_TIMEOUT_MS = 6000;
+const MAX_RECONNECT = 3;
 const DEBUG = true;
 
 const BUTTON_NAMES = { 0: "left", 1: "middle", 2: "right" };
 
-const dragState = {
-    active: false,
-    button: null,
-};
+const dragState = { active: false, button: null };
+const dcQueue = [];
+
+const platform = detectPlatform();
 
 const ICE_CONFIG = {
     sdpSemantics: "unified-plan",
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+    iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+    ],
+    bundlePolicy: "max-bundle",
+    rtcpMuxPolicy: "require",
 };
 
 const USABLE_CANDIDATE_TYPES = new Set(["srflx", "relay", "prflx"]);
@@ -52,14 +62,35 @@ const CODE_TO_KEY = {
 
 const stats = {
     dcState: "closed",
-    lastFrameTs: 0,
+    iceState: "new",
     fps: 0,
-    frameCount: 0,
     lastCoords: null,
 };
 
+function detectPlatform() {
+    const ua = navigator.userAgent || "";
+    const ios = /iPhone|iPad|iPod/i.test(ua);
+    const android = /Android/i.test(ua);
+    const safari = ios || (/Safari/i.test(ua) && !/Chrome|CriOS|FxiOS/i.test(ua));
+    const mobile =
+        ios ||
+        android ||
+        (navigator.maxTouchPoints > 0 && window.matchMedia("(max-width: 900px)").matches);
+    return { mobile, safari, ios, android };
+}
+
 function log(...args) {
     if (DEBUG) console.log("[any-remote]", ...args);
+}
+
+function initMobileDefaults() {
+    if (!platform.mobile) return;
+    qualityMode = "mobile";
+    const sel = document.getElementById("quality-select");
+    if (sel) sel.value = "mobile";
+    document.body.classList.add("is-mobile");
+    if (platform.safari) document.body.classList.add("is-safari");
+    log("mobile defaults", platform, "quality", qualityMode);
 }
 
 function setStatus(text, live) {
@@ -73,29 +104,21 @@ function updateToolbarInfo(coords) {
     const streamEl = document.getElementById("info-stream");
     const statsEl = document.getElementById("info-stats");
 
-    if (coords) {
-        stats.lastCoords = coords;
-    }
-    const drag = dragState.active ? ` · drag:${dragState.button}` : "";
+    if (coords) stats.lastCoords = coords;
+    const drag = dragState.active ? ` drag:${dragState.button}` : "";
     const xy = coords
-        ? `xy ${(coords.x * 100).toFixed(1)}% ${(coords.y * 100).toFixed(1)}%`
-        : "xy —";
-    coordsEl.textContent = `${xy} · ${displayMode} · ${zoomLevel}%${drag}`;
+        ? `${(coords.x * 100).toFixed(0)}% ${(coords.y * 100).toFixed(0)}%`
+        : "—";
+    coordsEl.textContent = `${xy}${drag}`;
 
     const vw = video.videoWidth || 0;
     const vh = video.videoHeight || 0;
-    const rect = video.getBoundingClientRect();
-    streamEl.textContent =
-        vw > 0
-            ? `src ${vw}×${vh} · view ${Math.round(rect.width)}×${Math.round(rect.height)} · ${qualityMode}`
-            : `stream · ${qualityMode}`;
+    streamEl.textContent = vw > 0 ? `${vw}×${vh}` : "—";
 
-    statsEl.textContent = `dc ${stats.dcState} · ~${stats.fps} fps · q ${qualityMode}`;
+    const plat = platform.mobile ? (platform.ios ? "iOS" : "mob") : "desk";
+    statsEl.textContent = `${plat} · dc:${stats.dcState} · ice:${stats.iceState} · ${stats.fps}fps`;
 }
 
-/**
- * Intrinsic stream size (pixels).
- */
 function streamSize() {
     const video = document.getElementById("video");
     return {
@@ -104,15 +127,12 @@ function streamSize() {
     };
 }
 
-/**
- * Compute real pixel dimensions for container + video (no CSS transform).
- */
 function layoutDimensions() {
     const { w: sw, h: sh } = streamSize();
     const viewport = document.getElementById("viewport");
-    const pad = 32;
-    const maxW = Math.max(200, viewport.clientWidth - pad);
-    const maxH = Math.max(150, viewport.clientHeight - pad);
+    const pad = platform.mobile ? 8 : 32;
+    const maxW = Math.max(120, viewport.clientWidth - pad);
+    const maxH = Math.max(120, viewport.clientHeight - pad);
 
     if (displayMode === "fit") {
         const scale = Math.min(maxW / sw, maxH / sh, 1);
@@ -121,7 +141,6 @@ function layoutDimensions() {
             height: Math.max(1, Math.round(sh * scale)),
         };
     }
-
     const z = zoomLevel / 100;
     return {
         width: Math.max(1, Math.round(sw * z)),
@@ -142,8 +161,6 @@ function applyViewerLayout() {
     document.getElementById("zoom-label").textContent = `${zoomLevel}%`;
     document.getElementById("btn-fit").classList.toggle("active", displayMode === "fit");
     document.getElementById("btn-actual").classList.toggle("active", displayMode === "actual");
-
-    log("layout", displayMode, width, height, "zoom", zoomLevel);
     updateToolbarInfo(stats.lastCoords);
 }
 
@@ -165,62 +182,58 @@ function resetZoom() {
 function setupViewerControls() {
     document.getElementById("zoom-slider").addEventListener("input", (e) => {
         zoomLevel = parseInt(e.target.value, 10);
-        if (displayMode === "fit") {
-            displayMode = "actual";
-            document.getElementById("btn-fit").classList.remove("active");
-            document.getElementById("btn-actual").classList.add("active");
-        }
+        if (displayMode === "fit") setDisplayMode("actual");
         applyViewerLayout();
     });
-
     document.getElementById("btn-fit").addEventListener("click", () => setDisplayMode("fit"));
     document.getElementById("btn-actual").addEventListener("click", () => setDisplayMode("actual"));
     document.getElementById("btn-reset-zoom").addEventListener("click", resetZoom);
-
     document.getElementById("quality-select").addEventListener("change", (e) => {
         qualityMode = e.target.value;
-        log("quality selected", qualityMode);
-        if (dc && dc.readyState === "open") {
-            dc.send(JSON.stringify({ t: "quality", mode: qualityMode }));
-            setStatus("Quality updated (reconnect for full effect)", true);
-        }
+        sendWhenDcOpen({ t: "quality", mode: qualityMode });
     });
-
     window.addEventListener("resize", () => applyViewerLayout());
-    applyViewerLayout();
 }
 
-function sendInput(event) {
-    if (!dc || dc.readyState !== "open") return;
-    dc.send(JSON.stringify(event));
-}
-
-/**
- * Coords from getBoundingClientRect — video sized to exact aspect (object-fit: fill).
- */
-function videoCoords(event) {
+function coordsFromClient(clientX, clientY) {
     const video = document.getElementById("video");
     const rect = video.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return null;
-
-    const x = (event.clientX - rect.left) / rect.width;
-    const y = (event.clientY - rect.top) / rect.height;
+    const x = (clientX - rect.left) / rect.width;
+    const y = (clientY - rect.top) / rect.height;
     if (x < 0 || x > 1 || y < 0 || y > 1) return null;
-
     return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
 }
 
-function codeToPyAutoKey(code) {
-    if (!code) return null;
-    if (CODE_TO_KEY[code]) return CODE_TO_KEY[code];
-    if (code.startsWith("Key") && code.length === 4) return code.slice(3).toLowerCase();
-    if (code.startsWith("Digit") && code.length === 6) return code.slice(5);
-    if (code.startsWith("Numpad") && code.length === 7) return code.slice(6);
-    return null;
+function videoCoords(event) {
+    return coordsFromClient(event.clientX, event.clientY);
 }
 
-function eventButton(event) {
-    return BUTTON_NAMES[event.button] || "left";
+function touchCoords(touch) {
+    return coordsFromClient(touch.clientX, touch.clientY);
+}
+
+function flushDcQueue() {
+    if (!dc || dc.readyState !== "open") return;
+    while (dcQueue.length) {
+        dc.send(dcQueue.shift());
+    }
+}
+
+function sendWhenDcOpen(event) {
+    const payload = JSON.stringify(event);
+    if (!dc) return;
+    if (dc.readyState === "open") {
+        dc.send(payload);
+        return;
+    }
+    if (dc.readyState === "connecting") {
+        dcQueue.push(payload);
+    }
+}
+
+function sendInput(event) {
+    sendWhenDcOpen(event);
 }
 
 function setRemoteDrag(active) {
@@ -228,85 +241,128 @@ function setRemoteDrag(active) {
     document.body.classList.toggle("remote-drag", active);
 }
 
+function beginDrag(button, coords) {
+    setRemoteDrag(true);
+    dragState.button = button;
+    lastMoveSent = 0;
+    log("mouseDown", button, coords.x.toFixed(4), coords.y.toFixed(4));
+    sendInput({ t: "down", button, x: coords.x, y: coords.y });
+}
+
 function endDrag(event) {
     if (!dragState.active) return;
-
-    const coords = (event && videoCoords(event)) || stats.lastCoords;
+    const coords = (event && (videoCoords(event) || touchCoords(event))) || stats.lastCoords;
     const button = dragState.button || "left";
-
     if (coords) {
         log("mouseUp", button, coords.x.toFixed(4), coords.y.toFixed(4));
         sendInput({ t: "up", button, x: coords.x, y: coords.y });
-    } else {
-        log("mouseUp", button, "(no coords)");
-        sendInput({ t: "up", button, x: 0, y: 0 });
     }
-
     setRemoteDrag(false);
     dragState.button = null;
 }
 
-function setupInputHandlers() {
+function sendMove(coords) {
+    if (!coords) return;
+    const interval = dragState.active ? DRAG_MOVE_INTERVAL_MS : MOVE_INTERVAL_MS;
+    const now = Date.now();
+    if (now - lastMoveSent < interval) return;
+    lastMoveSent = now;
+    if (dragState.active) log("drag move", coords.x.toFixed(3), coords.y.toFixed(3));
+    sendInput({ t: "move", x: coords.x, y: coords.y });
+}
+
+function codeToPyAutoKey(code) {
+    if (!code) return null;
+    if (CODE_TO_KEY[code]) return CODE_TO_KEY[code];
+    if (code.startsWith("Key") && code.length === 4) return code.slice(3).toLowerCase();
+    if (code.startsWith("Digit") && code.length === 6) return code.slice(5);
+    return null;
+}
+
+function setupPointerHandlers() {
     const video = document.getElementById("video");
+    const opts = { passive: false };
 
     video.addEventListener("dragstart", (e) => e.preventDefault());
     video.addEventListener("selectstart", (e) => e.preventDefault());
 
-    video.addEventListener("mousedown", (event) => {
-        event.preventDefault();
-        controlActive = true;
-        video.focus();
-
-        const coords = videoCoords(event);
-        if (!coords) return;
-
-        const button = eventButton(event);
-        setRemoteDrag(true);
-        dragState.button = button;
-        lastMoveSent = 0;
-
-        log("mouseDown", button, coords.x.toFixed(4), coords.y.toFixed(4));
-        sendInput({ t: "down", button, x: coords.x, y: coords.y });
-    });
+    video.addEventListener(
+        "mousedown",
+        (event) => {
+            event.preventDefault();
+            controlActive = true;
+            const coords = videoCoords(event);
+            if (!coords) return;
+            beginDrag(event.button === 2 ? "right" : event.button === 1 ? "middle" : "left", coords);
+        },
+        opts,
+    );
 
     video.addEventListener("mousemove", (event) => {
         const coords = videoCoords(event);
         updateToolbarInfo(coords);
-        if (!coords) return;
-
-        const interval = dragState.active ? DRAG_MOVE_INTERVAL_MS : MOVE_INTERVAL_MS;
-        const now = Date.now();
-        if (now - lastMoveSent < interval) return;
-        lastMoveSent = now;
-
-        if (dragState.active && DEBUG) {
-            log("drag move", coords.x.toFixed(4), coords.y.toFixed(4), dragState.button);
-        }
-        sendInput({ t: "move", x: coords.x, y: coords.y });
+        sendMove(coords);
     });
 
-    video.addEventListener("mouseup", (event) => {
-        event.preventDefault();
-        endDrag(event);
+    video.addEventListener("mouseup", (e) => {
+        e.preventDefault();
+        endDrag(e);
     });
 
-    video.addEventListener("mouseleave", (event) => {
-        if (dragState.active) {
-            const coords = videoCoords(event) || stats.lastCoords;
-            if (coords) {
-                sendInput({ t: "move", x: coords.x, y: coords.y });
-            }
-        }
+    video.addEventListener("contextmenu", (e) => e.preventDefault());
+
+    window.addEventListener("mouseup", () => {
+        if (dragState.active) endDrag(null);
     });
 
-    video.addEventListener("contextmenu", (event) => {
-        event.preventDefault();
-    });
+    /* Touch → same down/move/up protocol */
+    video.addEventListener(
+        "touchstart",
+        (e) => {
+            e.preventDefault();
+            controlActive = true;
+            const t = e.changedTouches[0];
+            if (!t) return;
+            const coords = touchCoords(t);
+            if (!coords) return;
+            log("touchstart", coords.x.toFixed(3), coords.y.toFixed(3));
+            beginDrag("left", coords);
+        },
+        opts,
+    );
 
-    window.addEventListener("mouseup", (event) => {
-        if (!dragState.active) return;
-        endDrag(event);
-    });
+    video.addEventListener(
+        "touchmove",
+        (e) => {
+            e.preventDefault();
+            const t = e.changedTouches[0];
+            if (!t) return;
+            const coords = touchCoords(t);
+            updateToolbarInfo(coords);
+            sendMove(coords);
+        },
+        opts,
+    );
+
+    video.addEventListener(
+        "touchend",
+        (e) => {
+            e.preventDefault();
+            const t = e.changedTouches[0];
+            log("touchend");
+            endDrag(t ? { clientX: t.clientX, clientY: t.clientY } : null);
+        },
+        opts,
+    );
+
+    video.addEventListener(
+        "touchcancel",
+        (e) => {
+            e.preventDefault();
+            endDrag(null);
+        },
+        opts,
+    );
 
     window.addEventListener("blur", () => {
         if (dragState.active) endDrag(null);
@@ -317,53 +373,57 @@ function setupInputHandlers() {
         const key = codeToPyAutoKey(event.code);
         if (!key) return;
         event.preventDefault();
-        event.stopPropagation();
-        sendInput(
-            event.type === "keydown"
-                ? { t: "keydown", key, code: event.code }
-                : { t: "keyup", key, code: event.code },
-        );
+        sendInput(event.type === "keydown" ? { t: "keydown", key, code: event.code } : { t: "keyup", key, code: event.code });
     };
-
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("keyup", onKey, true);
 }
 
-function configureLowLatencyReceiver(receiver) {
-    if (!receiver) return;
-    if ("playoutDelayHint" in receiver) receiver.playoutDelayHint = 0;
-    if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 0;
-    log("receiver low-latency hints set");
+async function playVideoElement() {
+    const video = document.getElementById("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.setAttribute("playsinline", "");
+    video.setAttribute("webkit-playsinline", "true");
+    try {
+        await video.play();
+        log("video.play ok");
+    } catch (err) {
+        log("video.play failed (tap Connect again if black)", err);
+    }
 }
 
-function startFpsMonitor() {
-    const video = document.getElementById("video");
-    let frames = 0;
-    let lastT = performance.now();
+function configureLowLatencyReceiver(receiver) {
+    if (!receiver) return;
+    try {
+        if ("playoutDelayHint" in receiver) receiver.playoutDelayHint = 0;
+        if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 0;
+    } catch (_) { /* Safari may throw on unsupported hints */ }
+}
 
-    function tick(now, metadata) {
-        frames += 1;
-        if (now - lastT >= 1000) {
-            stats.fps = frames;
-            frames = 0;
-            lastT = now;
-            updateToolbarInfo(stats.lastCoords);
-            if (DEBUG) log("render fps ~", stats.fps);
+function waitForIceGathering(peer, timeoutMs) {
+    const ms = platform.safari ? Math.max(timeoutMs, 8000) : timeoutMs;
+    return new Promise((resolve) => {
+        if (peer.iceGatheringState === "complete") {
+            resolve();
+            return;
         }
-        if (video.srcObject) {
-            if (video.requestVideoFrameCallback) {
-                video.requestVideoFrameCallback(tick);
-            } else {
-                requestAnimationFrame((t) => tick(t, null));
-            }
-        }
-    }
-
-    if (video.requestVideoFrameCallback) {
-        video.requestVideoFrameCallback(tick);
-    } else {
-        setInterval(() => updateToolbarInfo(stats.lastCoords), 1000);
-    }
+        const done = () => {
+            clearTimeout(timer);
+            peer.removeEventListener("icegatheringstatechange", onChange);
+            resolve();
+        };
+        const onChange = () => {
+            stats.iceState = peer.iceGatheringState;
+            log("iceGathering", peer.iceGatheringState);
+            if (peer.iceGatheringState === "complete") done();
+        };
+        const timer = setTimeout(() => {
+            log("ICE gather timeout — continuing", ms);
+            done();
+        }, ms);
+        peer.addEventListener("icegatheringstatechange", onChange);
+    });
 }
 
 function parseCandidate(line) {
@@ -374,20 +434,16 @@ function parseCandidate(line) {
     return { ip: parts[4], typ: parts[typIndex + 1] };
 }
 
-function isUnusableAddress(ip) {
-    if (ip.endsWith(".local")) return true;
-    if (["127.0.0.1", "0.0.0.0", "::1", "::"].includes(ip)) return true;
-    if (ip.startsWith("10.") || ip.startsWith("192.168.")) return true;
-    if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
-    return ip.startsWith("127.") || ip.startsWith("169.254.");
-}
-
 function keepCandidateLine(line) {
     const parsed = parseCandidate(line);
     if (!parsed) return true;
     if (parsed.typ === "host") return false;
     if (USABLE_CANDIDATE_TYPES.has(parsed.typ)) return true;
-    return !isUnusableAddress(parsed.ip);
+    const ip = parsed.ip;
+    if (ip.endsWith(".local")) return true;
+    if (["127.0.0.1", "0.0.0.0", "::1"].includes(ip)) return true;
+    if (ip.startsWith("10.") || ip.startsWith("192.168.")) return true;
+    return false;
 }
 
 function filterSdpCandidates(sdp) {
@@ -402,23 +458,26 @@ function filterSdpCandidates(sdp) {
 
 function setupDataChannel(channel) {
     dc = channel;
+    stats.dcState = channel.readyState;
+    log("DataChannel setup", channel.readyState);
 
     channel.addEventListener("open", () => {
         stats.dcState = "open";
         log("DataChannel onopen");
         setStatus("Connected", true);
-        dc.send(JSON.stringify({ t: "quality", mode: qualityMode }));
+        flushDcQueue();
+        sendWhenDcOpen({ t: "quality", mode: qualityMode });
     });
 
     channel.addEventListener("close", () => {
         stats.dcState = "closed";
         log("DataChannel onclose");
-        setStatus("Disconnected", false);
+        if (sessionActive) setStatus("DC closed", false);
     });
 
     channel.addEventListener("error", (e) => {
         stats.dcState = "error";
-        console.error("[any-remote] DataChannel onerror", e);
+        console.error("[any-remote] DataChannel error", e);
     });
 
     channel.addEventListener("message", (ev) => {
@@ -430,36 +489,105 @@ function setupDataChannel(channel) {
                     qualityMode = msg.quality;
                     document.getElementById("quality-select").value = qualityMode;
                 }
-                log("meta", msg);
                 applyViewerLayout();
+                playVideoElement();
             }
         } catch (_) { /* ignore */ }
     });
 }
 
-function negotiate() {
+function effectiveQuality() {
+    if (platform.mobile && qualityMode === "balanced") return "mobile";
+    return qualityMode;
+}
+
+function cleanupPeer() {
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+    if (dc) {
+        dc.close();
+        dc = null;
+    }
+    dcQueue.length = 0;
+    if (pc) {
+        pc.close();
+        pc = null;
+    }
+    const video = document.getElementById("video");
+    if (video) video.srcObject = null;
+}
+
+function scheduleReconnect() {
+    if (!sessionActive || reconnectAttempts >= MAX_RECONNECT) return;
+    reconnectAttempts += 1;
+    const delay = 1500 * reconnectAttempts;
+    log("reconnect attempt", reconnectAttempts, "in", delay);
+    setStatus(`Reconnect ${reconnectAttempts}…`, false);
+    reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        if (sessionActive) connectSession();
+    }, delay);
+}
+
+function connectSession() {
+    cleanupPeer();
+    stats.dcState = "connecting";
+    stats.iceState = "new";
+
+    pc = new RTCPeerConnection(ICE_CONFIG);
+
+    pc.addEventListener("iceconnectionstatechange", () => {
+        stats.iceState = pc.iceConnectionState;
+        log("iceConnectionState", pc.iceConnectionState);
+        if (pc.iceConnectionState === "failed" && sessionActive) {
+            scheduleReconnect();
+        }
+    });
+
+    pc.addEventListener("connectionstatechange", () => {
+        log("connectionState", pc.connectionState);
+        if (pc.connectionState === "connected") {
+            reconnectAttempts = 0;
+            setStatus("Live", true);
+            playVideoElement();
+        } else if (pc.connectionState === "failed") {
+            setStatus("Failed", false);
+            if (sessionActive) scheduleReconnect();
+        } else if (pc.connectionState === "disconnected") {
+            setStatus("Disconnected", false);
+            if (sessionActive) scheduleReconnect();
+        }
+    });
+
+    pc.addEventListener("track", (evt) => {
+        if (evt.track.kind !== "video") return;
+        const video = document.getElementById("video");
+        video.srcObject = evt.streams[0];
+        configureLowLatencyReceiver(evt.receiver);
+        evt.track.onmute = () => log("video track muted");
+        evt.track.onunmute = () => log("video track unmuted");
+
+        const onMeta = () => {
+            log("video metadata", video.videoWidth, video.videoHeight);
+            applyViewerLayout();
+            playVideoElement();
+        };
+        video.addEventListener("loadedmetadata", onMeta, { once: true });
+        video.addEventListener("resize", () => applyViewerLayout());
+        playVideoElement();
+    });
+
     pc.addTransceiver("video", { direction: "recvonly" });
-    setupDataChannel(pc.createDataChannel("input"));
+    setupDataChannel(pc.createDataChannel("input", { ordered: true }));
+
+    const q = effectiveQuality();
 
     return pc
         .createOffer()
         .then((offer) => pc.setLocalDescription(offer))
-        .then(
-            () =>
-                new Promise((resolve) => {
-                    if (pc.iceGatheringState === "complete") {
-                        resolve();
-                        return;
-                    }
-                    const check = () => {
-                        if (pc.iceGatheringState === "complete") {
-                            pc.removeEventListener("icegatheringstatechange", check);
-                            resolve();
-                        }
-                    };
-                    pc.addEventListener("icegatheringstatechange", check);
-                }),
-        )
+        .then(() => waitForIceGathering(pc, ICE_GATHER_TIMEOUT_MS))
         .then(() =>
             fetch("/offer", {
                 method: "POST",
@@ -467,7 +595,8 @@ function negotiate() {
                 body: JSON.stringify({
                     sdp: filterSdpCandidates(pc.localDescription.sdp),
                     type: pc.localDescription.type,
-                    quality: qualityMode,
+                    quality: q,
+                    mobile: platform.mobile,
                 }),
             }),
         )
@@ -485,12 +614,14 @@ function negotiate() {
         })
         .catch((err) => {
             console.error(err);
-            alert("Connection failed: " + err);
             setStatus("Error", false);
+            if (sessionActive) scheduleReconnect();
         });
 }
 
 function start() {
+    sessionActive = true;
+    reconnectAttempts = 0;
     controlActive = false;
     hostMeta = null;
     qualityMode = document.getElementById("quality-select").value;
@@ -498,66 +629,51 @@ function start() {
     document.getElementById("start").style.display = "none";
     document.getElementById("stop").style.display = "inline-block";
     setStatus("Connecting…", false);
-    stats.dcState = "connecting";
 
-    pc = new RTCPeerConnection(ICE_CONFIG);
-
-    pc.addEventListener("track", (evt) => {
-        if (evt.track.kind !== "video") return;
-        const video = document.getElementById("video");
-        video.srcObject = evt.streams[0];
-        configureLowLatencyReceiver(evt.receiver);
-
-        const onMeta = () => {
-            log("video metadata", video.videoWidth, video.videoHeight);
-            applyViewerLayout();
-            startFpsMonitor();
-        };
-        video.addEventListener("loadedmetadata", onMeta, { once: true });
-        video.addEventListener("resize", () => applyViewerLayout());
-    });
-
-    pc.addEventListener("connectionstatechange", () => {
-        log("connectionState", pc.connectionState);
-        if (pc.connectionState === "connected") {
-            setStatus("Live", true);
-        } else if (pc.connectionState === "failed") {
-            setStatus("Failed", false);
-        }
-    });
-
-    negotiate();
+    log("start", platform);
+    connectSession();
 }
 
 function stop() {
-    controlActive = false;
-    if (dragState.active) {
-        endDrag(null);
-    }
+    sessionActive = false;
+    if (dragState.active) endDrag(null);
+    cleanupPeer();
+
     document.getElementById("stop").style.display = "none";
     document.getElementById("start").style.display = "inline-block";
     setStatus("Offline", false);
     stats.dcState = "closed";
     stats.fps = 0;
+    applyViewerLayout();
+    updateToolbarInfo(null);
+}
 
-    if (dc) {
-        dc.close();
-        dc = null;
-    }
-    setTimeout(() => {
-        if (pc) {
-            pc.close();
-            pc = null;
+function startFpsMonitor() {
+    const video = document.getElementById("video");
+    let frames = 0;
+    let lastT = performance.now();
+
+    function tick(now) {
+        frames += 1;
+        if (now - lastT >= 1000) {
+            stats.fps = frames;
+            frames = 0;
+            lastT = now;
+            updateToolbarInfo(stats.lastCoords);
         }
-        const video = document.getElementById("video");
-        video.srcObject = null;
-        applyViewerLayout();
-        updateToolbarInfo(null);
-    }, 200);
+        if (video.srcObject && video.requestVideoFrameCallback) {
+            video.requestVideoFrameCallback(tick);
+        }
+    }
+    if (video.requestVideoFrameCallback) {
+        video.requestVideoFrameCallback(tick);
+    }
 }
 
 document.getElementById("start").addEventListener("click", start);
 document.getElementById("stop").addEventListener("click", stop);
 
+initMobileDefaults();
 setupViewerControls();
-setupInputHandlers();
+setupPointerHandlers();
+startFpsMonitor();

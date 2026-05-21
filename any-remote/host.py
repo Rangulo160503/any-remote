@@ -78,6 +78,9 @@ async def offer(request: web.Request) -> web.Response:
     params = await request.json()
 
     quality = params.get("quality", DEFAULT_QUALITY)
+    if params.get("mobile"):
+        quality = "mobile"
+        logging.info("mobile client detected — using mobile preset")
     current_preset = get_preset(quality)
     capture.apply_preset(current_preset)
 
@@ -144,14 +147,15 @@ async def offer(request: web.Request) -> web.Response:
 
     video_track = ScreenStreamTrack(capture)
     sender = pc.addTrack(video_track)
-    force_codec(pc, sender, "video/VP8")
+    codec = "video/H264" if params.get("mobile") else "video/VP8"
+    force_codec(pc, sender, codec)
 
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
     answer_sdp = filter_sdp_candidates(pc.localDescription.sdp)
-    logging.info("answer ready quality=%s VP8", current_preset.name)
+    logging.info("answer ready quality=%s codec=%s", current_preset.name, codec)
 
     return web.Response(
         content_type="application/json",
@@ -170,7 +174,6 @@ async def stats(_: web.Request) -> web.Response:
     data = {"ts": time.time()}
     if capture is not None:
         data["grabs"] = capture.stats_grabs
-        data["dropped"] = capture.stats_dropped
     if video_track is not None:
         data["sent"] = video_track.frames_sent
         data["skipped"] = video_track.frames_skipped

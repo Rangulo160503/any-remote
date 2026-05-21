@@ -18,6 +18,14 @@ class QualityPreset:
 
 
 PRESETS: dict[str, QualityPreset] = {
+    "mobile": QualityPreset(
+        name="mobile",
+        max_width=640,
+        max_height=360,
+        fps=10,
+        bitrate=550_000,
+        resample=Image.Resampling.BILINEAR,
+    ),
     "low": QualityPreset(
         name="low",
         max_width=854,
