@@ -25,19 +25,41 @@ MAX_WIDTH = 1280
 MAX_HEIGHT = 720
 
 
+class CaptureGeometry:
+    """Native monitor size (mss) and encoded stream size sent to the browser."""
+
+    __slots__ = ("monitor_width", "monitor_height", "stream_width", "stream_height")
+
+    def __init__(self) -> None:
+        self.monitor_width = 0
+        self.monitor_height = 0
+        self.stream_width = MAX_WIDTH
+        self.stream_height = MAX_HEIGHT
+
+
 class ScreenCapture:
     """Background thread grabs the primary monitor at ~TARGET_FPS."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._frame: Optional[np.ndarray] = None
-        self._size: tuple[int, int] = (MAX_WIDTH, MAX_HEIGHT)
+        self._geometry = CaptureGeometry()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="screen-capture", daemon=True)
 
     @property
     def size(self) -> tuple[int, int]:
-        return self._size
+        with self._lock:
+            return self._geometry.stream_width, self._geometry.stream_height
+
+    def get_geometry(self) -> CaptureGeometry:
+        with self._lock:
+            g = CaptureGeometry()
+            g.monitor_width = self._geometry.monitor_width
+            g.monitor_height = self._geometry.monitor_height
+            g.stream_width = self._geometry.stream_width
+            g.stream_height = self._geometry.stream_height
+            return g
 
     def start(self) -> None:
         self._thread.start()
@@ -56,6 +78,17 @@ class ScreenCapture:
         interval = FRAME_PERIOD
         with mss() as sct:
             monitor = sct.monitors[1]
+            with self._lock:
+                self._geometry.monitor_width = monitor["width"]
+                self._geometry.monitor_height = monitor["height"]
+            logger.info(
+                "capture monitor %sx%s (stream max %sx%s)",
+                monitor["width"],
+                monitor["height"],
+                MAX_WIDTH,
+                MAX_HEIGHT,
+            )
+
             while not self._stop.is_set():
                 t0 = time.perf_counter()
                 try:
@@ -65,7 +98,8 @@ class ScreenCapture:
                     arr = np.asarray(img)
                     with self._lock:
                         self._frame = arr
-                        self._size = (img.width, img.height)
+                        self._geometry.stream_width = img.width
+                        self._geometry.stream_height = img.height
                 except Exception:
                     logger.exception("screen grab failed")
                 elapsed = time.perf_counter() - t0

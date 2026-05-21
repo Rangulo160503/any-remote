@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-    <title>Any-Remote — PC CASA</title>
+    <title>Any-Remote</title>
     <style>
         * { box-sizing: border-box; }
         body {
@@ -34,17 +34,48 @@
         }
         #viewer {
             position: relative;
+            display: inline-block;
             max-width: 1280px;
+            width: 100%;
             border: 1px solid #334155;
             border-radius: 6px;
             overflow: hidden;
             background: #000;
         }
-        video {
+        #video {
             display: block;
             width: 100%;
             max-height: 720px;
+            object-fit: contain;
             cursor: crosshair;
+            pointer-events: auto;
+            outline: none;
+        }
+        #cursor-dot {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            margin: -5px 0 0 -5px;
+            border-radius: 50%;
+            background: rgba(255, 80, 80, 0.9);
+            border: 2px solid #fff;
+            pointer-events: none;
+            display: none;
+            z-index: 2;
+        }
+        #coord-debug {
+            position: absolute;
+            top: 6px;
+            left: 6px;
+            padding: 4px 8px;
+            font-size: 11px;
+            font-family: ui-monospace, monospace;
+            background: rgba(0, 0, 0, 0.75);
+            color: #a5f3fc;
+            pointer-events: none;
+            z-index: 2;
+            line-height: 1.4;
+            white-space: pre;
         }
         .hint {
             margin-top: 12px;
@@ -54,7 +85,7 @@
     </style>
 </head>
 <body>
-    <h1>Remote desktop — PC CASA</h1>
+    <h1>Remote desktop</h1>
     <div class="toolbar">
         <button id="start" onclick="start()">Connect</button>
         <button id="stop" style="display:none" onclick="stop()">Disconnect</button>
@@ -62,12 +93,14 @@
     </div>
 
     <div id="viewer">
-        <video id="video" autoplay playsinline muted></video>
+        <video id="video" autoplay playsinline muted tabindex="0"></video>
+        <div id="cursor-dot"></div>
+        <pre id="coord-debug">—</pre>
     </div>
 
     <p class="hint">
-        Open via Tailscale IP or ngrok HTTPS URL. WebRTC uses STUN (not the ngrok tunnel).
-        Click Connect, then use the video to control the remote mouse.
+        Click the video to capture keyboard. Right-click on the video for remote context menu.
+        Coordinates map to the visible picture only (letterbox bars are ignored).
     </p>
 
     <script src="client.js"></script>

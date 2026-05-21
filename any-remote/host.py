@@ -17,12 +17,13 @@ import logging
 import os
 import ssl
 
+import pyautogui
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription
 
 from ice_config import ICE_CONFIGURATION, filter_sdp_candidates
 from screen_track import ScreenCapture, ScreenStreamTrack
-from input_handler import handle_message
+from input_handler import bind_capture, handle_message
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CLIENT = os.path.join(ROOT, "client")
@@ -60,11 +61,34 @@ async def offer(request: web.Request) -> web.Response:
     def on_datachannel(channel) -> None:
         if channel.label != "input":
             return
-        logging.info("input datachannel open from controller")
+
+        @channel.on("open")
+        def on_open() -> None:
+            logging.info("DataChannel open: %s", channel.label)
+            geom = capture.get_geometry()
+            sw, sh = pyautogui.size()
+            channel.send(
+                json.dumps(
+                    {
+                        "t": "meta",
+                        "streamW": geom.stream_width,
+                        "streamH": geom.stream_height,
+                        "monitorW": geom.monitor_width,
+                        "monitorH": geom.monitor_height,
+                        "screenW": sw,
+                        "screenH": sh,
+                    }
+                )
+            )
+
+        @channel.on("close")
+        def on_close() -> None:
+            logging.info("DataChannel closed")
 
         @channel.on("message")
         def on_message(message) -> None:
             if isinstance(message, str):
+                logging.debug("DataChannel <= %s", message[:160])
                 handle_message(message)
 
     pc.addTrack(ScreenStreamTrack(capture))
@@ -101,6 +125,7 @@ def main() -> None:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
     capture.start()
+    bind_capture(capture)
 
     ssl_context = None
     if args.cert_file:
