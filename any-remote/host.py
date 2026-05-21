@@ -20,6 +20,7 @@ import ssl
 from aiohttp import web
 from aiortc import RTCPeerConnection, RTCSessionDescription
 
+from ice_config import ICE_CONFIGURATION, filter_sdp_candidates
 from screen_track import ScreenCapture, ScreenStreamTrack
 from input_handler import handle_message
 
@@ -42,9 +43,10 @@ async def javascript(_: web.Request) -> web.Response:
 
 async def offer(request: web.Request) -> web.Response:
     params = await request.json()
-    offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
+    offer_sdp = filter_sdp_candidates(params["sdp"])
+    offer = RTCSessionDescription(sdp=offer_sdp, type=params["type"])
 
-    pc = RTCPeerConnection()
+    pc = RTCPeerConnection(configuration=ICE_CONFIGURATION)
     pcs.add(pc)
 
     @pc.on("connectionstatechange")
@@ -71,11 +73,13 @@ async def offer(request: web.Request) -> web.Response:
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
+    # setLocalDescription gathers ICE (incl. STUN srflx); strip unusable host candidates.
+    answer_sdp = filter_sdp_candidates(pc.localDescription.sdp)
+    logging.info("ICE answer ready (host candidates filtered, STUN srflx kept)")
+
     return web.Response(
         content_type="application/json",
-        text=json.dumps(
-            {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-        ),
+        text=json.dumps({"sdp": answer_sdp, "type": pc.localDescription.type}),
     )
 
 
@@ -109,7 +113,12 @@ def main() -> None:
     app.router.add_get("/client.js", javascript)
     app.router.add_post("/offer", offer)
 
-    logging.info("Host ready — controller opens http://<tailscale-ip>:%s", args.port)
+    logging.info(
+        "Host ready — signaling on port %s (STUN: %s). "
+        "Use ngrok for HTTP; WebRTC uses public srflx candidates.",
+        args.port,
+        "stun.l.google.com:19302",
+    )
     web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_context)
 
 

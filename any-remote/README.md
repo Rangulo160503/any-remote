@@ -7,6 +7,7 @@ Minimal remote desktop: **PC CASA** (host) streams its screen; **PC AFZ** (brows
 ```
 any-remote/
 ├── host.py              # Run on PC CASA — HTTP signaling + WebRTC
+├── ice_config.py        # STUN + SDP candidate filtering (srflx only)
 ├── screen_track.py      # mss capture → aiortc VideoStreamTrack
 ├── input_handler.py     # DataChannel JSON → pyautogui
 ├── requirements.txt
@@ -86,6 +87,16 @@ python host.py --port 8080 -v          # debug logs
 python host.py --cert-file cert.pem --key-file key.pem   # HTTPS
 ```
 
+## Public internet (ngrok + STUN)
+
+Use **ngrok only for HTTP signaling** (HTML, `/offer`). WebRTC media uses **UDP** with **Google STUN** — not the ngrok tunnel.
+
+1. On PC CASA: `python host.py`
+2. On PC CASA: `ngrok http 8080` → open `https://xxxx.ngrok-free.app` on the remote browser
+3. Both peers use `stun:stun.l.google.com:19302` and SDP is filtered to **srflx** candidates (no host/local)
+
+If ICE still fails, symmetric NAT may require TURN (not included yet).
+
 ## Phase summary
 
 | Phase | Feature |
@@ -98,7 +109,9 @@ python host.py --cert-file cert.pem --key-file key.pem   # HTTPS
 | Problem | Check |
 |---------|--------|
 | Page does not load on AFZ | Tailscale connected on both; correct IP; firewall allows 8080 on CASA |
-| Connect fails | Browser console (F12); run host with `-v`; both machines online in Tailscale admin |
+| Connect fails | Browser console (F12); run host with `-v`; check for `typ srflx` in SDP (F12 → filtered in JS) |
+| `Remote candidate could not be resolved` | Ensure STUN + candidate filter deployed; restart host; hard-refresh browser (Ctrl+F5) |
+| ngrok works but no video | ngrok is signaling only; WebRTC needs UDP + srflx candidates from STUN |
 | Black video | Host running; user logged into desktop on CASA |
 | Mouse does not move | Status shows DataChannel open; pyautogui works locally on CASA |
 | High latency | Normal for MVP; lower capture resolution in `screen_track.py` if needed |

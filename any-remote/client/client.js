@@ -1,13 +1,20 @@
 /**
  * PC AFZ — browser controller.
- * Connects to PC CASA host, shows remote video, sends mouse events on DataChannel "input".
+ * STUN + filtered ICE candidates for cross-network WebRTC (ngrok = signaling only).
  */
 
 let pc = null;
 let dc = null;
 let lastMoveSent = 0;
 
-const MOVE_INTERVAL_MS = 50; // ~20 move events/sec max
+const MOVE_INTERVAL_MS = 50;
+
+const ICE_CONFIG = {
+    sdpSemantics: "unified-plan",
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+};
+
+const USABLE_CANDIDATE_TYPES = new Set(["srflx", "relay", "prflx"]);
 
 function setStatus(text) {
     document.getElementById("status").textContent = text;
@@ -64,13 +71,86 @@ function setupInputHandlers() {
     });
 }
 
+function parseCandidate(line) {
+    if (!line.startsWith("a=candidate:")) {
+        return null;
+    }
+    const parts = line.slice("a=candidate:".length).split(" ");
+    if (parts.length < 8) {
+        return null;
+    }
+    const typIndex = parts.indexOf("typ");
+    if (typIndex < 0) {
+        return null;
+    }
+    return { ip: parts[4], typ: parts[typIndex + 1] };
+}
+
+function isUnusableAddress(ip) {
+    if (ip.endsWith(".local")) {
+        return true;
+    }
+    if (ip === "127.0.0.1" || ip === "0.0.0.0" || ip === "::1" || ip === "::") {
+        return true;
+    }
+    if (ip.startsWith("10.") || ip.startsWith("192.168.")) {
+        return true;
+    }
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) {
+        return true;
+    }
+    if (ip.startsWith("127.") || ip.startsWith("169.254.")) {
+        return true;
+    }
+    return false;
+}
+
+function keepCandidateLine(line) {
+    const parsed = parseCandidate(line);
+    if (!parsed) {
+        return true;
+    }
+    if (parsed.typ === "host") {
+        return false;
+    }
+    if (USABLE_CANDIDATE_TYPES.has(parsed.typ)) {
+        return true;
+    }
+    return !isUnusableAddress(parsed.ip);
+}
+
+/**
+ * Drop host/local ICE candidates so only STUN srflx (and future TURN relay) are used.
+ */
+function filterSdpCandidates(sdp) {
+    let kept = 0;
+    let dropped = 0;
+    const lines = sdp.replace(/\r\n/g, "\n").split("\n").filter((line) => {
+        if (!line.startsWith("a=candidate:")) {
+            return true;
+        }
+        if (keepCandidateLine(line)) {
+            kept += 1;
+            return true;
+        }
+        dropped += 1;
+        return false;
+    });
+    console.debug(`SDP ICE filter: kept=${kept} dropped=${dropped}`);
+    let body = lines.join("\r\n");
+    if (body && !body.endsWith("\r\n")) {
+        body += "\r\n";
+    }
+    return body;
+}
+
 function negotiate() {
     pc.addTransceiver("video", { direction: "recvonly" });
 
     dc = pc.createDataChannel("input");
 
     dc.addEventListener("open", () => {
-        setStatus("Connected — controlling PC CASA");
+        setStatus("Connected — controlling remote host");
     });
 
     dc.addEventListener("close", () => {
@@ -96,10 +176,11 @@ function negotiate() {
         })
         .then(() => {
             const offer = pc.localDescription;
+            const sdp = filterSdpCandidates(offer.sdp);
             return fetch("/offer", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ sdp: offer.sdp, type: offer.type }),
+                body: JSON.stringify({ sdp, type: offer.type }),
             });
         })
         .then((response) => {
@@ -108,7 +189,10 @@ function negotiate() {
             }
             return response.json();
         })
-        .then((answer) => pc.setRemoteDescription(answer))
+        .then((answer) => {
+            answer.sdp = filterSdpCandidates(answer.sdp);
+            return pc.setRemoteDescription(answer);
+        })
         .catch((err) => {
             console.error(err);
             alert("Connection failed: " + err);
@@ -117,9 +201,7 @@ function negotiate() {
 }
 
 function start() {
-    const config = { sdpSemantics: "unified-plan" };
-    // No STUN/TURN — Tailscale provides reachable host candidates.
-    pc = new RTCPeerConnection(config);
+    pc = new RTCPeerConnection(ICE_CONFIG);
 
     pc.addEventListener("track", (evt) => {
         if (evt.track.kind === "video") {
@@ -135,11 +217,15 @@ function start() {
         }
     });
 
+    pc.addEventListener("iceconnectionstatechange", () => {
+        console.log("ICE connection state:", pc.iceConnectionState);
+    });
+
     setupInputHandlers();
 
     document.getElementById("start").style.display = "none";
     document.getElementById("stop").style.display = "inline-block";
-    setStatus("Connecting…");
+    setStatus("Connecting (STUN gathering)…");
     negotiate();
 }
 
