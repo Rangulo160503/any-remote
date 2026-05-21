@@ -101,15 +101,24 @@ python host.py --port 8080 -v          # debug logs
 python host.py --cert-file cert.pem --key-file key.pem   # HTTPS
 ```
 
-## Public internet (ngrok + STUN)
+## Public internet (ngrok + STUN + TURN)
 
-Use **ngrok only for HTTP signaling** (HTML, `/offer`). WebRTC media uses **UDP** with **Google STUN** — not the ngrok tunnel.
+Use **ngrok only for HTTP signaling** (HTML, `/offer`, `/ice-config`). WebRTC media uses **STUN + TURN (Metered)** — not the ngrok tunnel.
 
-1. On PC CASA: `python host.py`
-2. On PC CASA: `ngrok http 8080` → open `https://xxxx.ngrok-free.app` on the remote browser
-3. Both peers use `stun:stun.l.google.com:19302` and SDP is filtered to **srflx** candidates (no host/local)
+1. On PC CASA: `python host.py -v`
+2. On PC CASA: `ngrok http 8080` → open `https://xxxx.ngrok-free.app` on the remote browser (hard-refresh on phones)
+3. Browser loads `GET /ice-config` (STUN + TURN UDP/TCP/TLS). SDP keeps **srflx** and **relay** candidates; host candidates are stripped.
+4. Toolbar **info-conn** shows `ok · ice:connected · relay · dc:open · codec · fps` when TURN relay is in use.
 
-If ICE still fails, symmetric NAT may require TURN (not included yet).
+Optional host env overrides:
+
+```powershell
+$env:TURN_USERNAME = "your-user"
+$env:TURN_CREDENTIAL = "your-secret"
+python host.py -v
+```
+
+**iPhone / LTE:** needs TURN relay in most cases; `turns:...:443?transport=tcp` helps on restrictive firewalls.
 
 ## Phase summary
 
@@ -125,7 +134,8 @@ If ICE still fails, symmetric NAT may require TURN (not included yet).
 | Page does not load on AFZ | Tailscale connected on both; correct IP; firewall allows 8080 on CASA |
 | Connect fails | Browser console (F12); run host with `-v`; check for `typ srflx` in SDP (F12 → filtered in JS) |
 | `Remote candidate could not be resolved` | Ensure STUN + candidate filter deployed; restart host; hard-refresh browser (Ctrl+F5) |
-| ngrok works but no video | ngrok is signaling only; WebRTC needs UDP + srflx candidates from STUN |
+| ngrok works but no video | ngrok is signaling only; WebRTC needs STUN/TURN (check toolbar shows `relay`) |
+| iPhone ICE failed | Ensure `/ice-config` loads; host `-v` logs `relay` in offer_ice/answer_ice; wait for ICE gather (up to 20s on iOS) |
 | Black video (desktop) | Host running; user logged into desktop on CASA |
 | iPhone Safari black / DC closed | Hard-refresh; host `-v` should show `negotiated=H264`, keyframe prime, delayed ICE cleanup; tap **Connect** once (user gesture for `play()`); try **Mobile** quality |
 | Mouse does not move | Status shows DataChannel open; pyautogui works locally on CASA |

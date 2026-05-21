@@ -1,4 +1,13 @@
-# Progress — 2026-05-21
+# Progress — 2026-05-21 (TURN)
+
+## TURN relay (Metered)
+- `ice_config.py`: STUN + TURN (UDP 80, TCP 80/443, TLS 443) for host + `GET /ice-config`
+- Client fetches `/ice-config`; fallback embeds same servers
+- SDP filter keeps `relay` candidates; logs offer/answer ICE counts on host
+- Toolbar `#info-conn`: connection, ICE, relay/p2p path, DC, codec, FPS
+- Input gated until `connectionState=connected` + ICE connected + DC open
+- Host meta delayed until connection connected
+- ICE gather timeout 15–20s on mobile for TURN candidates
 
 ## Safari / iPhone pass
 - Host: delayed ICE-failed cleanup (12s Safari, 6s desktop) — avoids premature peer teardown → "DC closed"

@@ -22,7 +22,12 @@ from aiohttp import web
 from aiortc import RTCPeerConnection, RTCRtpSender, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 
-from ice_config import ICE_CONFIGURATION, filter_sdp_candidates
+from ice_config import (
+    ICE_CONFIGURATION,
+    count_sdp_candidates,
+    filter_sdp_candidates,
+    ice_servers_json,
+)
 from input_handler import bind_capture, handle_message
 from peer_session import PeerSession
 from screen_track import ScreenCapture, ScreenStreamTrack
@@ -237,6 +242,18 @@ def get_relayed_video_track() -> MediaStreamTrack:
     return media_relay.subscribe(shared_source, buffered=False)
 
 
+async def _send_meta_when_connected(session: PeerSession, channel) -> None:
+    """Send stream meta only after ICE + DTLS are up (Safari/LTE)."""
+    for _ in range(120):
+        if session.id not in sessions:
+            return
+        if session.pc.connectionState == "connected":
+            send_meta(channel, session, session.codec)
+            return
+        await asyncio.sleep(0.05)
+    logging.warning("peer %s meta send timeout (connection not connected)", session.label)
+
+
 async def apply_peer_bitrate(session: PeerSession) -> None:
     for _ in range(30):
         senders = session.pc.getSenders()
@@ -328,6 +345,11 @@ async def index(request: web.Request) -> web.Response:
     return web.Response(content_type="text/html", text=content)
 
 
+async def ice_config(request: web.Request) -> web.Response:
+    logging.debug("GET /ice-config from %s", request.remote)
+    return web.json_response(ice_servers_json())
+
+
 async def javascript(request: web.Request) -> web.Response:
     logging.info("GET /client.js from %s", request.remote)
     try:
@@ -352,6 +374,7 @@ async def offer(request: web.Request) -> web.Response:
     maybe_upgrade_shared_capture(preset)
 
     offer_sdp = filter_sdp_candidates(params["sdp"])
+    offer_ice = count_sdp_candidates(offer_sdp)
     remote = RTCSessionDescription(sdp=offer_sdp, type=params["type"])
 
     pc = RTCPeerConnection(configuration=ICE_CONFIGURATION)
@@ -361,7 +384,7 @@ async def offer(request: web.Request) -> web.Response:
     sessions[session.id] = session
 
     h264_first = mobile or safari
-    ice_fail_delay = 12.0 if safari else 6.0
+    ice_fail_delay = 20.0 if safari else 10.0
     logging.info(
         "peer %s created mobile=%s safari=%s quality=%s h264=%s",
         session.label,
@@ -400,7 +423,7 @@ async def offer(request: web.Request) -> web.Response:
         @channel.on("open")
         def on_open() -> None:
             logging.info("peer %s DataChannel open", session.label)
-            send_meta(channel, session, session.codec)
+            asyncio.ensure_future(_send_meta_when_connected(session, channel))
 
         @channel.on("close")
         def on_close() -> None:
@@ -428,14 +451,17 @@ async def offer(request: web.Request) -> web.Response:
     answer_sdp = filter_sdp_candidates(pc.localDescription.sdp)
     if h264_first:
         answer_sdp = prefer_h264_in_answer_sdp(answer_sdp)
+    answer_ice = count_sdp_candidates(answer_sdp)
     negotiated = sdp_video_codec(answer_sdp)
     logging.info(
-        "peer %s answer codec=%s negotiated=%s bitrate=%d fps=%d",
+        "peer %s answer codec=%s negotiated=%s bitrate=%d fps=%d offer_ice=%s answer_ice=%s",
         session.label,
         session.codec,
         negotiated,
         preset.bitrate,
         preset.fps,
+        offer_ice,
+        answer_ice,
     )
 
     return web.Response(
@@ -516,6 +542,7 @@ def main() -> None:
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
     app.router.add_get("/client.js", javascript)
+    app.router.add_get("/ice-config", ice_config)
     app.router.add_get("/stats", stats)
     app.router.add_post("/offer", offer)
 

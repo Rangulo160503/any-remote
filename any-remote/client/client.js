@@ -28,18 +28,62 @@ const dcQueue = [];
 
 const platform = detectPlatform();
 
-const ICE_SERVERS = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
+/** Fallback if GET /ice-config fails (Metered STUN + TURN). */
+const ICE_SERVERS_FALLBACK = [
+    { urls: "stun:stun.relay.metered.ca:80" },
+    {
+        urls: "turn:standard.relay.metered.ca:80",
+        username: "bd8989604d98ccf84f5bd12f",
+        credential: "ZEq6ndSozfIK+IqK",
+    },
+    {
+        urls: "turn:standard.relay.metered.ca:80?transport=tcp",
+        username: "bd8989604d98ccf84f5bd12f",
+        credential: "ZEq6ndSozfIK+IqK",
+    },
+    {
+        urls: "turn:standard.relay.metered.ca:443",
+        username: "bd8989604d98ccf84f5bd12f",
+        credential: "ZEq6ndSozfIK+IqK",
+    },
+    {
+        urls: "turns:standard.relay.metered.ca:443?transport=tcp",
+        username: "bd8989604d98ccf84f5bd12f",
+        credential: "ZEq6ndSozfIK+IqK",
+    },
 ];
 
-function buildPeerConnectionConfig() {
+let iceServersCache = null;
+let statsPollTimer = null;
+let inputReady = false;
+
+async function fetchIceServers() {
+    if (iceServersCache) return iceServersCache;
+    try {
+        const r = await fetch("/ice-config");
+        if (r.ok) {
+            const data = await r.json();
+            iceServersCache = data.iceServers || ICE_SERVERS_FALLBACK;
+            log("ICE servers loaded", iceServersCache.length);
+            return iceServersCache;
+        }
+    } catch (err) {
+        log("ICE config fetch failed", err.message || err);
+    }
+    iceServersCache = ICE_SERVERS_FALLBACK;
+    return iceServersCache;
+}
+
+function buildPeerConnectionConfig(iceServers) {
     const cfg = {
-        iceServers: ICE_SERVERS,
+        iceServers,
+        iceTransportPolicy: "all",
         bundlePolicy: "max-bundle",
         rtcpMuxPolicy: "require",
     };
-    // iOS Safari can misbehave with explicit sdpSemantics on newer WebKit.
+    if (platform.mobile) {
+        cfg.iceCandidatePoolSize = 4;
+    }
     if (!platform.ios) {
         cfg.sdpSemantics = "unified-plan";
     }
@@ -71,8 +115,13 @@ const CODE_TO_KEY = {
 const stats = {
     dcState: "closed",
     iceState: "new",
+    iceConnState: "new",
+    connState: "new",
     fps: 0,
     codec: "—",
+    relay: false,
+    localCandType: "—",
+    remoteCandType: "—",
     lastCoords: null,
 };
 
@@ -113,7 +162,7 @@ function updateToolbarInfo(coords) {
     const video = document.getElementById("video");
     const coordsEl = document.getElementById("info-coords");
     const streamEl = document.getElementById("info-stream");
-    const statsEl = document.getElementById("info-stats");
+    const connEl = document.getElementById("info-conn");
 
     if (coords) stats.lastCoords = coords;
     const drag = dragState.active ? ` drag:${dragState.button}` : "";
@@ -126,8 +175,116 @@ function updateToolbarInfo(coords) {
     const vh = video.videoHeight || 0;
     streamEl.textContent = vw > 0 ? `${vw}×${vh}` : "—";
 
-    const plat = platform.ios ? "iOS" : platform.mobile ? "mob" : "desk";
-    statsEl.textContent = `${plat} · ${stats.codec} · dc:${stats.dcState} · ${stats.fps}fps`;
+    const path =
+        stats.relay || stats.localCandType === "relay" || stats.remoteCandType === "relay"
+            ? "relay"
+            : stats.localCandType !== "—"
+              ? `${stats.localCandType}↔${stats.remoteCandType}`
+              : "—";
+    const live = stats.connState === "connected" && isIceConnected();
+    connEl.textContent = `${live ? "ok" : stats.connState} · ice:${stats.iceConnState} · ${path} · dc:${stats.dcState} · ${stats.codec} · ${stats.fps}fps`;
+}
+
+function isIceConnected() {
+    if (!pc) return false;
+    const ice = pc.iceConnectionState;
+    return ice === "connected" || ice === "completed";
+}
+
+function canSendInput() {
+    return (
+        inputReady &&
+        dc &&
+        dc.readyState === "open" &&
+        pc &&
+        pc.connectionState === "connected" &&
+        isIceConnected()
+    );
+}
+
+function refreshInputReady() {
+    const ready =
+        pc &&
+        pc.connectionState === "connected" &&
+        isIceConnected() &&
+        dc &&
+        dc.readyState === "open";
+    if (ready && !inputReady) {
+        inputReady = true;
+        log("input ready (ICE + connection + DataChannel)");
+        flushDcQueue();
+        sendWhenDcOpen({ t: "quality", mode: effectiveQuality() });
+    } else if (!ready) {
+        inputReady = false;
+    }
+    updateToolbarInfo(stats.lastCoords);
+}
+
+async function refreshConnectionStats() {
+    if (!pc) return;
+    stats.connState = pc.connectionState;
+    stats.iceConnState = pc.iceConnectionState;
+
+    try {
+        const reports = await pc.getStats();
+        let pair = null;
+        const cands = new Map();
+
+        reports.forEach((r) => {
+            if (r.type === "candidate-pair" && (r.selected || r.nominated)) {
+                pair = r;
+            }
+            if (r.type === "local-candidate") cands.set(r.id, r);
+            if (r.type === "remote-candidate") cands.set(r.id, r);
+        });
+
+        if (!pair) {
+            reports.forEach((r) => {
+                if (r.type === "candidate-pair" && r.state === "succeeded") pair = r;
+            });
+        }
+
+        if (pair) {
+            const local = cands.get(pair.localCandidateId);
+            const remote = cands.get(pair.remoteCandidateId);
+            stats.localCandType = local?.candidateType || "—";
+            stats.remoteCandType = remote?.candidateType || "—";
+            stats.relay =
+                stats.localCandType === "relay" || stats.remoteCandType === "relay";
+            log(
+                "ICE pair",
+                stats.localCandType,
+                "↔",
+                stats.remoteCandType,
+                "relay=",
+                stats.relay,
+            );
+        }
+    } catch (err) {
+        log("getStats failed", err.message || err);
+    }
+
+    refreshInputReady();
+}
+
+function startStatsPoll() {
+    stopStatsPoll();
+    refreshConnectionStats();
+    statsPollTimer = setInterval(refreshConnectionStats, 1500);
+}
+
+function stopStatsPoll() {
+    if (statsPollTimer) {
+        clearInterval(statsPollTimer);
+        statsPollTimer = null;
+    }
+}
+
+function logLocalIceCandidate(candidate) {
+    const parsed = parseCandidate("a=candidate:" + candidate.candidate);
+    const typ = parsed?.typ || candidate.type || "?";
+    log("local ICE candidate", typ, candidate.protocol || "");
+    if (typ === "relay") log("TURN relay candidate gathered");
 }
 
 function streamSize() {
@@ -244,6 +401,13 @@ function sendWhenDcOpen(event) {
 }
 
 function sendInput(event) {
+    if (!canSendInput()) {
+        const payload = JSON.stringify(event);
+        if (dc && (dc.readyState === "connecting" || dc.readyState === "open")) {
+            dcQueue.push(payload);
+        }
+        return;
+    }
     sendWhenDcOpen(event);
 }
 
@@ -253,6 +417,7 @@ function setRemoteDrag(active) {
 }
 
 function beginDrag(button, coords) {
+    if (!canSendInput()) return;
     setRemoteDrag(true);
     dragState.button = button;
     lastMoveSent = 0;
@@ -301,6 +466,7 @@ function setupPointerHandlers() {
         "mousedown",
         (event) => {
             event.preventDefault();
+            if (!canSendInput()) return;
             controlActive = true;
             const coords = videoCoords(event);
             if (!coords) return;
@@ -331,6 +497,7 @@ function setupPointerHandlers() {
         "touchstart",
         (e) => {
             e.preventDefault();
+            if (!canSendInput()) return;
             controlActive = true;
             const t = e.changedTouches[0];
             if (!t) return;
@@ -380,7 +547,7 @@ function setupPointerHandlers() {
     });
 
     const onKey = (event) => {
-        if (!controlActive || !dc || dc.readyState !== "open") return;
+        if (!controlActive || !canSendInput()) return;
         const key = codeToPyAutoKey(event.code);
         if (!key) return;
         event.preventDefault();
@@ -486,7 +653,7 @@ function attachVideoTrack(evt) {
 }
 
 function waitForIceGathering(peer, timeoutMs) {
-    const ms = platform.ios ? 12000 : platform.safari ? 9000 : timeoutMs;
+    const ms = platform.ios ? 20000 : platform.safari ? 15000 : timeoutMs || 12000;
     return new Promise((resolve) => {
         if (peer.iceGatheringState === "complete") {
             resolve();
@@ -547,16 +714,10 @@ function setupDataChannel(channel) {
 
     channel.addEventListener("open", () => {
         stats.dcState = "open";
-        log("DataChannel onopen");
-        setStatus("Connected", true);
-        const flush = () => {
-            flushDcQueue();
-            sendWhenDcOpen({ t: "quality", mode: qualityMode });
-        };
-        if (platform.ios) {
-            setTimeout(flush, 150);
-        } else {
-            flush();
+        log("DataChannel onopen", "pc=", pc && pc.connectionState, "ice=", pc && pc.iceConnectionState);
+        refreshInputReady();
+        if (canSendInput()) {
+            setStatus("Live", true);
         }
     });
 
@@ -604,6 +765,14 @@ function effectiveQuality() {
 }
 
 function cleanupPeer() {
+    stopStatsPoll();
+    inputReady = false;
+    stats.relay = false;
+    stats.localCandType = "—";
+    stats.remoteCandType = "—";
+    stats.connState = "closed";
+    stats.iceConnState = "closed";
+
     if (disconnectTimer) {
         clearTimeout(disconnectTimer);
         disconnectTimer = null;
@@ -623,6 +792,7 @@ function cleanupPeer() {
     }
     const video = document.getElementById("video");
     if (video) video.srcObject = null;
+    updateToolbarInfo(null);
 }
 
 function scheduleReconnect() {
@@ -637,41 +807,47 @@ function scheduleReconnect() {
     }, delay);
 }
 
-function connectSession() {
-    cleanupPeer();
-    stats.dcState = "connecting";
-    stats.iceState = "new";
-
-    pc = new RTCPeerConnection(buildPeerConnectionConfig());
+function wirePeerEvents() {
+    pc.addEventListener("icecandidate", (ev) => {
+        if (ev.candidate) logLocalIceCandidate(ev.candidate);
+    });
 
     pc.addEventListener("iceconnectionstatechange", () => {
-        stats.iceState = pc.iceConnectionState;
+        stats.iceConnState = pc.iceConnectionState;
+        stats.iceState = pc.iceGatheringState;
         log("iceConnectionState", pc.iceConnectionState);
-        if (pc.iceConnectionState === "connected") {
-            playVideoElement();
-        }
+        refreshInputReady();
+        if (isIceConnected()) playVideoElement();
         if (pc.iceConnectionState === "failed" && sessionActive) {
+            setStatus("ICE failed", false);
             scheduleReconnect();
         }
     });
 
     pc.addEventListener("connectionstatechange", () => {
-        log("connectionState", pc.connectionState);
+        stats.connState = pc.connectionState;
+        log("connectionState", pc.connectionState, "ice=", pc.iceConnectionState);
+        refreshInputReady();
         if (disconnectTimer) {
             clearTimeout(disconnectTimer);
             disconnectTimer = null;
         }
         if (pc.connectionState === "connected") {
             reconnectAttempts = 0;
-            setStatus("Live", true);
+            if (canSendInput()) {
+                setStatus("Live", true);
+            } else {
+                setStatus("Connected (no input yet)", true);
+            }
             playVideoElement();
+            refreshConnectionStats();
         } else if (pc.connectionState === "failed") {
             setStatus("Failed", false);
             if (sessionActive) scheduleReconnect();
         } else if (pc.connectionState === "disconnected") {
             setStatus("Reconnecting…", false);
             if (sessionActive) {
-                const delay = platform.ios ? 4000 : 2000;
+                const delay = platform.ios ? 5000 : 2500;
                 disconnectTimer = setTimeout(() => {
                     disconnectTimer = null;
                     if (pc && pc.connectionState === "disconnected" && sessionActive) {
@@ -686,41 +862,61 @@ function connectSession() {
         if (evt.track.kind !== "video") return;
         attachVideoTrack(evt);
     });
+}
 
-    pc.addTransceiver("video", { direction: "recvonly" });
-    preferReceiverH264(pc);
+function connectSession() {
+    cleanupPeer();
+    inputReady = false;
+    stats.dcState = "connecting";
+    stats.iceState = "new";
+    stats.connState = "connecting";
+    stats.iceConnState = "new";
 
-    const dcOpts = platform.ios
-        ? { ordered: false, maxRetransmits: 0 }
-        : { ordered: true };
-    setupDataChannel(pc.createDataChannel("input", dcOpts));
+    return fetchIceServers()
+        .then((iceServers) => {
+            log("platform", platform, "quality", effectiveQuality());
+            pc = new RTCPeerConnection(buildPeerConnectionConfig(iceServers));
+            wirePeerEvents();
+            startStatsPoll();
 
-    const q = effectiveQuality();
+            pc.addTransceiver("video", { direction: "recvonly" });
+            preferReceiverH264(pc);
 
-    return pc
-        .createOffer()
-        .then((offer) => pc.setLocalDescription(offer))
-        .then(() => waitForIceGathering(pc, ICE_GATHER_TIMEOUT_MS))
-        .then(() =>
-            fetch("/offer", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    sdp: filterSdpCandidates(pc.localDescription.sdp),
-                    type: pc.localDescription.type,
-                    quality: q,
-                    mobile: platform.mobile,
-                    safari: platform.safari,
-                    ios: platform.ios,
-                }),
-            }),
-        )
+            const dcOpts = platform.ios
+                ? { ordered: false, maxRetransmits: 0 }
+                : { ordered: true };
+            setupDataChannel(pc.createDataChannel("input", dcOpts));
+
+            const q = effectiveQuality();
+            return pc
+                .createOffer()
+                .then((offer) => pc.setLocalDescription(offer))
+                .then(() => waitForIceGathering(pc, ICE_GATHER_TIMEOUT_MS))
+                .then(() => {
+                    const sdp = filterSdpCandidates(pc.localDescription.sdp);
+                    const counts = countSdpCandidates(sdp);
+                    log("offer SDP ICE", counts);
+                    return fetch("/offer", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            sdp,
+                            type: pc.localDescription.type,
+                            quality: q,
+                            mobile: platform.mobile,
+                            safari: platform.safari,
+                            ios: platform.ios,
+                        }),
+                    });
+                });
+        })
         .then((r) => {
             if (!r.ok) throw new Error("Signaling " + r.status);
             return r.json();
         })
         .then((answer) => {
             answer.sdp = filterSdpCandidates(answer.sdp);
+            log("answer SDP ICE", countSdpCandidates(answer.sdp));
             if (answer.quality) {
                 qualityMode = answer.quality;
                 document.getElementById("quality-select").value = qualityMode;
@@ -736,6 +932,7 @@ function connectSession() {
                     setTimeout(playVideoElement, 400);
                     setTimeout(playVideoElement, 1200);
                 }
+                refreshConnectionStats();
             });
         })
         .catch((err) => {
@@ -745,10 +942,20 @@ function connectSession() {
         });
 }
 
+function countSdpCandidates(sdp) {
+    const counts = { host: 0, srflx: 0, relay: 0, prflx: 0 };
+    for (const line of sdp.replace(/\r\n/g, "\n").split("\n")) {
+        const p = parseCandidate(line);
+        if (p && counts[p.typ] !== undefined) counts[p.typ] += 1;
+    }
+    return counts;
+}
+
 function start() {
     sessionActive = true;
     reconnectAttempts = 0;
     controlActive = false;
+    inputReady = false;
     hostMeta = null;
     qualityMode = document.getElementById("quality-select").value;
 

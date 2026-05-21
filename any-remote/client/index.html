@@ -87,6 +87,19 @@
             color: #6e7681;
         }
 
+        .toolbar-diag {
+            flex: 1 1 100%;
+            min-width: 0;
+        }
+
+        #info-conn {
+            display: block;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
         .viewport {
             flex: 1 1 auto;
             min-height: 0;
@@ -184,10 +197,10 @@
                 </label>
             </div>
 
-            <div class="toolbar-group">
+            <div class="toolbar-group toolbar-diag">
                 <span class="info-line" id="info-coords">—</span>
                 <span class="info-line hide-mobile" id="info-stream">—</span>
-                <span class="info-line" id="info-stats">—</span>
+                <span class="info-line" id="info-conn">—</span>
             </div>
         </header>
 
