@@ -27,6 +27,7 @@ class PeerSession:
     mobile: bool
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     video_track: MediaStreamTrack | None = None
+    codec: str = "video/VP8"
 
     @property
     def label(self) -> str:

@@ -26,7 +26,7 @@ from ice_config import ICE_CONFIGURATION, filter_sdp_candidates
 from input_handler import bind_capture, handle_message
 from peer_session import PeerSession
 from screen_track import ScreenCapture, ScreenStreamTrack
-from stream_config import DEFAULT_QUALITY, QualityPreset, get_preset
+from stream_config import DEFAULT_QUALITY, QualityPreset, get_preset, max_preset
 
 ROOT = Path(__file__).resolve().parent
 CLIENT_DIR = ROOT / "client"
@@ -52,11 +52,41 @@ def log_active_peers(reason: str = "") -> None:
     )
 
 
-def force_codec(pc: RTCPeerConnection, sender: RTCRtpSender, mime: str) -> None:
-    kind = mime.split("/")[0]
+def prefer_sender_codecs(pc: RTCPeerConnection, sender: RTCRtpSender, h264_first: bool) -> str:
+    """Set codec preference order; Safari/iOS needs H.264."""
+    kind = "video"
     codecs = RTCRtpSender.getCapabilities(kind).codecs
+    h264 = [c for c in codecs if c.mimeType == "video/H264"]
+    vp8 = [c for c in codecs if c.mimeType == "video/VP8"]
+    preferred = (h264 + vp8) if h264_first else (vp8 + h264)
+    if not preferred:
+        preferred = codecs
     transceiver = next(t for t in pc.getTransceivers() if t.sender == sender)
-    transceiver.setCodecPreferences([c for c in codecs if c.mimeType == mime])
+    transceiver.setCodecPreferences(preferred)
+    chosen = "video/H264" if h264_first and h264 else "video/VP8"
+    return chosen
+
+
+def sdp_video_codec(sdp: str) -> str:
+    for line in sdp.splitlines():
+        if "H264" in line or "h264" in line:
+            if line.startswith("a=rtpmap:") and "H264" in line.upper():
+                return "H264"
+        if line.startswith("a=rtpmap:") and "VP8" in line:
+            return "VP8"
+    return "unknown"
+
+
+def maybe_upgrade_shared_capture(preset: QualityPreset) -> None:
+    """Raise shared capture resolution when a viewer requests higher quality."""
+    global capture
+    if capture is None:
+        return
+    current = capture._preset
+    better = max_preset(current, preset)
+    if better.name != current.name:
+        capture.apply_preset(better)
+        logging.info("shared capture upgraded -> %s", better.name)
 
 
 def set_sender_bitrate(sender: RTCRtpSender, bitrate: int) -> bool:
@@ -110,7 +140,7 @@ async def apply_peer_bitrate(session: PeerSession) -> None:
         await asyncio.sleep(0.1)
 
 
-def send_meta(channel, session: PeerSession) -> None:
+def send_meta(channel, session: PeerSession, codec: str) -> None:
     assert capture is not None
     geom = capture.get_geometry()
     sw, sh = pyautogui.size()
@@ -128,6 +158,7 @@ def send_meta(channel, session: PeerSession) -> None:
                 "quality": session.preset.name,
                 "fps": session.preset.fps,
                 "bitrate": session.preset.bitrate,
+                "codec": codec,
             }
         )
     )
@@ -195,10 +226,12 @@ async def offer(request: web.Request) -> web.Response:
     params = await request.json()
     quality = params.get("quality", DEFAULT_QUALITY)
     mobile = bool(params.get("mobile"))
-    if mobile:
+    safari = bool(params.get("safari") or params.get("ios"))
+    if mobile and quality == "balanced":
         quality = "mobile"
 
     preset = get_preset(quality)
+    maybe_upgrade_shared_capture(preset)
 
     offer_sdp = filter_sdp_candidates(params["sdp"])
     remote = RTCSessionDescription(sdp=offer_sdp, type=params["type"])
@@ -209,7 +242,15 @@ async def offer(request: web.Request) -> web.Response:
     pcs.add(pc)
     sessions[session.id] = session
 
-    logging.info("peer %s created (mobile=%s quality=%s)", session.label, mobile, preset.name)
+    h264_first = mobile or safari
+    logging.info(
+        "peer %s created mobile=%s safari=%s quality=%s h264=%s",
+        session.label,
+        mobile,
+        safari,
+        preset.name,
+        h264_first,
+    )
     log_active_peers("new peer")
 
     @pc.on("connectionstatechange")
@@ -239,7 +280,7 @@ async def offer(request: web.Request) -> web.Response:
         @channel.on("open")
         def on_open() -> None:
             logging.info("peer %s DataChannel open", session.label)
-            send_meta(channel, session)
+            send_meta(channel, session, session.codec)
 
         @channel.on("close")
         def on_close() -> None:
@@ -258,15 +299,22 @@ async def offer(request: web.Request) -> web.Response:
     session.video_track = get_relayed_video_track()
     sender = pc.addTrack(session.video_track)
 
-    codec = "video/H264" if mobile else "video/VP8"
-    force_codec(pc, sender, codec)
+    session.codec = prefer_sender_codecs(pc, sender, h264_first=h264_first)
 
     await pc.setRemoteDescription(remote)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
     answer_sdp = filter_sdp_candidates(pc.localDescription.sdp)
-    logging.info("peer %s answer ready codec=%s", session.label, codec)
+    negotiated = sdp_video_codec(answer_sdp)
+    logging.info(
+        "peer %s answer codec=%s negotiated=%s bitrate=%d fps=%d",
+        session.label,
+        session.codec,
+        negotiated,
+        preset.bitrate,
+        preset.fps,
+    )
 
     return web.Response(
         content_type="application/json",
@@ -276,6 +324,7 @@ async def offer(request: web.Request) -> web.Response:
                 "type": pc.localDescription.type,
                 "quality": preset.name,
                 "peerId": session.id,
+                "codec": negotiated,
             }
         ),
     )
@@ -316,7 +365,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Any-remote host")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8080)
-    parser.add_argument("--quality", choices=["low", "balanced", "high", "mobile"], default=DEFAULT_QUALITY)
+    parser.add_argument(
+        "--quality",
+        choices=["mobile", "low", "balanced", "high", "ultra"],
+        default=DEFAULT_QUALITY,
+    )
     parser.add_argument("--cert-file")
     parser.add_argument("--key-file")
     parser.add_argument("-v", "--verbose", action="count")

@@ -64,8 +64,11 @@ const stats = {
     dcState: "closed",
     iceState: "new",
     fps: 0,
+    codec: "—",
     lastCoords: null,
 };
+
+let disconnectTimer = null;
 
 function detectPlatform() {
     const ua = navigator.userAgent || "";
@@ -115,8 +118,8 @@ function updateToolbarInfo(coords) {
     const vh = video.videoHeight || 0;
     streamEl.textContent = vw > 0 ? `${vw}×${vh}` : "—";
 
-    const plat = platform.mobile ? (platform.ios ? "iOS" : "mob") : "desk";
-    statsEl.textContent = `${plat} · dc:${stats.dcState} · ice:${stats.iceState} · ${stats.fps}fps`;
+    const plat = platform.ios ? "iOS" : platform.mobile ? "mob" : "desk";
+    statsEl.textContent = `${plat} · ${stats.codec} · dc:${stats.dcState} · ${stats.fps}fps`;
 }
 
 function streamSize() {
@@ -381,15 +384,25 @@ function setupPointerHandlers() {
 
 async function playVideoElement() {
     const video = document.getElementById("video");
+    if (!video.srcObject) return;
+
     video.muted = true;
+    video.defaultMuted = true;
+    video.autoplay = true;
     video.playsInline = true;
     video.setAttribute("playsinline", "");
     video.setAttribute("webkit-playsinline", "true");
-    try {
-        await video.play();
-        log("video.play ok");
-    } catch (err) {
-        log("video.play failed (tap Connect again if black)", err);
+    video.setAttribute("x-webkit-airplay", "deny");
+
+    for (let attempt = 1; attempt <= 4; attempt++) {
+        try {
+            await video.play();
+            log("video.play ok attempt", attempt);
+            return;
+        } catch (err) {
+            log("video.play attempt", attempt, err.message || err);
+            await new Promise((r) => setTimeout(r, 200 * attempt));
+        }
     }
 }
 
@@ -401,8 +414,24 @@ function configureLowLatencyReceiver(receiver) {
     } catch (_) { /* Safari may throw on unsupported hints */ }
 }
 
+function preferReceiverH264(pc) {
+    if (!platform.safari && !platform.ios) return;
+    try {
+        const caps = RTCRtpReceiver.getCapabilities("video");
+        const h264 = caps.codecs.filter((c) => c.mimeType === "video/H264");
+        const rest = caps.codecs.filter((c) => c.mimeType !== "video/H264");
+        const tr = pc.getTransceivers().find((t) => t.receiver);
+        if (tr && h264.length) {
+            tr.setCodecPreferences(h264.concat(rest));
+            log("receiver codec preference: H264 first");
+        }
+    } catch (err) {
+        log("preferReceiverH264 skipped", err.message || err);
+    }
+}
+
 function waitForIceGathering(peer, timeoutMs) {
-    const ms = platform.safari ? Math.max(timeoutMs, 8000) : timeoutMs;
+    const ms = platform.ios ? 12000 : platform.safari ? 9000 : timeoutMs;
     return new Promise((resolve) => {
         if (peer.iceGatheringState === "complete") {
             resolve();
@@ -465,14 +494,23 @@ function setupDataChannel(channel) {
         stats.dcState = "open";
         log("DataChannel onopen");
         setStatus("Connected", true);
-        flushDcQueue();
-        sendWhenDcOpen({ t: "quality", mode: qualityMode });
+        const flush = () => {
+            flushDcQueue();
+            sendWhenDcOpen({ t: "quality", mode: qualityMode });
+        };
+        if (platform.ios) {
+            setTimeout(flush, 150);
+        } else {
+            flush();
+        }
     });
 
     channel.addEventListener("close", () => {
         stats.dcState = "closed";
-        log("DataChannel onclose");
-        if (sessionActive) setStatus("DC closed", false);
+        log("DataChannel onclose", "pc=", pc && pc.connectionState);
+        if (sessionActive && pc && pc.connectionState !== "connected") {
+            setStatus("DC closed", false);
+        }
     });
 
     channel.addEventListener("error", (e) => {
@@ -489,6 +527,8 @@ function setupDataChannel(channel) {
                     qualityMode = msg.quality;
                     document.getElementById("quality-select").value = qualityMode;
                 }
+                if (msg.codec) stats.codec = msg.codec;
+                log("meta", msg.quality, msg.codec, msg.streamW, "x", msg.streamH);
                 applyViewerLayout();
                 playVideoElement();
             }
@@ -497,11 +537,15 @@ function setupDataChannel(channel) {
 }
 
 function effectiveQuality() {
-    if (platform.mobile && qualityMode === "balanced") return "mobile";
+    if (platform.ios || (platform.mobile && qualityMode === "balanced")) return "mobile";
     return qualityMode;
 }
 
 function cleanupPeer() {
+    if (disconnectTimer) {
+        clearTimeout(disconnectTimer);
+        disconnectTimer = null;
+    }
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
@@ -541,6 +585,9 @@ function connectSession() {
     pc.addEventListener("iceconnectionstatechange", () => {
         stats.iceState = pc.iceConnectionState;
         log("iceConnectionState", pc.iceConnectionState);
+        if (pc.iceConnectionState === "connected") {
+            playVideoElement();
+        }
         if (pc.iceConnectionState === "failed" && sessionActive) {
             scheduleReconnect();
         }
@@ -548,6 +595,10 @@ function connectSession() {
 
     pc.addEventListener("connectionstatechange", () => {
         log("connectionState", pc.connectionState);
+        if (disconnectTimer) {
+            clearTimeout(disconnectTimer);
+            disconnectTimer = null;
+        }
         if (pc.connectionState === "connected") {
             reconnectAttempts = 0;
             setStatus("Live", true);
@@ -556,8 +607,16 @@ function connectSession() {
             setStatus("Failed", false);
             if (sessionActive) scheduleReconnect();
         } else if (pc.connectionState === "disconnected") {
-            setStatus("Disconnected", false);
-            if (sessionActive) scheduleReconnect();
+            setStatus("Reconnecting…", false);
+            if (sessionActive) {
+                const delay = platform.ios ? 4000 : 2000;
+                disconnectTimer = setTimeout(() => {
+                    disconnectTimer = null;
+                    if (pc && pc.connectionState === "disconnected" && sessionActive) {
+                        scheduleReconnect();
+                    }
+                }, delay);
+            }
         }
     });
 
@@ -580,6 +639,7 @@ function connectSession() {
     });
 
     pc.addTransceiver("video", { direction: "recvonly" });
+    preferReceiverH264(pc);
     setupDataChannel(pc.createDataChannel("input", { ordered: true }));
 
     const q = effectiveQuality();
@@ -597,6 +657,8 @@ function connectSession() {
                     type: pc.localDescription.type,
                     quality: q,
                     mobile: platform.mobile,
+                    safari: platform.safari,
+                    ios: platform.ios,
                 }),
             }),
         )
@@ -611,6 +673,10 @@ function connectSession() {
                 document.getElementById("quality-select").value = qualityMode;
             }
             if (answer.peerId) log("assigned peerId", answer.peerId);
+            if (answer.codec) {
+                stats.codec = answer.codec;
+                log("negotiated codec", answer.codec);
+            }
             return pc.setRemoteDescription(answer);
         })
         .catch((err) => {

@@ -81,10 +81,19 @@ class ScreenCapture:
     def _resize_rgb(
         self, rgb: bytes, width: int, height: int, max_w: int, max_h: int, resample: Image.Resampling
     ) -> np.ndarray:
+        """Downscale with explicit resize (sharper text than thumbnail alone)."""
         if width <= max_w and height <= max_h:
             return np.frombuffer(rgb, dtype=np.uint8).reshape(height, width, 3).copy()
+
         img = Image.frombytes("RGB", (width, height), rgb)
-        img.thumbnail((max_w, max_h), resample)
+        scale = min(max_w / width, max_h / height, 1.0)
+        new_w = max(2, int(width * scale))
+        new_h = max(2, int(height * scale))
+        if new_w % 2:
+            new_w -= 1
+        if new_h % 2:
+            new_h -= 1
+        img = img.resize((new_w, new_h), resample)
         return np.asarray(img)
 
     def _run(self) -> None:
