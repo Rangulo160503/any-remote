@@ -14,6 +14,7 @@ import logging
 import os
 import ssl
 import time
+from pathlib import Path
 from typing import Optional
 
 import pyautogui
@@ -27,8 +28,10 @@ from peer_session import PeerSession
 from screen_track import ScreenCapture, ScreenStreamTrack
 from stream_config import DEFAULT_QUALITY, QualityPreset, get_preset
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-CLIENT = os.path.join(ROOT, "client")
+ROOT = Path(__file__).resolve().parent
+CLIENT_DIR = ROOT / "client"
+INDEX_HTML = CLIENT_DIR / "index.html"
+CLIENT_JS = CLIENT_DIR / "client.js"
 
 # Active peer connections (one RTCPeerConnection per viewer).
 pcs: set[RTCPeerConnection] = set()
@@ -147,14 +150,43 @@ def handle_peer_quality(raw: str, session: PeerSession) -> None:
         set_sender_bitrate(senders[0], session.preset.bitrate)
 
 
-async def index(_: web.Request) -> web.Response:
-    with open(os.path.join(CLIENT, "index.html"), encoding="utf-8") as f:
-        return web.Response(content_type="text/html", text=content)
+def _read_client_file(path: Path, label: str) -> str:
+    if not path.is_file():
+        logging.error("%s not found: %s", label, path)
+        raise FileNotFoundError(f"{label} not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    logging.debug("served %s (%d bytes)", label, len(text.encode("utf-8")))
+    return text
 
 
-async def javascript(_: web.Request) -> web.Response:
-    with open(os.path.join(CLIENT, "client.js"), encoding="utf-8") as f:
-        return web.Response(content_type="application/javascript", text=content)
+def validate_client_files() -> None:
+    for path, name in ((INDEX_HTML, "index.html"), (CLIENT_JS, "client.js")):
+        if path.is_file():
+            logging.info("client file ok: %s", path)
+        else:
+            logging.error("client file MISSING: %s", path)
+            raise FileNotFoundError(f"Required file missing: {path}")
+
+
+async def index(request: web.Request) -> web.Response:
+    logging.info("GET / from %s", request.remote)
+    try:
+        content = _read_client_file(INDEX_HTML, "index.html")
+    except FileNotFoundError as exc:
+        logging.exception("failed to load index.html")
+        return web.Response(status=500, text=f"Server error: {exc}")
+    logging.info("GET / -> index.html ok")
+    return web.Response(content_type="text/html", text=content)
+
+
+async def javascript(request: web.Request) -> web.Response:
+    logging.info("GET /client.js from %s", request.remote)
+    try:
+        content = _read_client_file(CLIENT_JS, "client.js")
+    except FileNotFoundError as exc:
+        logging.exception("failed to load client.js")
+        return web.Response(status=500, text=f"Server error: {exc}")
+    return web.Response(content_type="application/javascript", text=content)
 
 
 async def offer(request: web.Request) -> web.Response:
@@ -291,6 +323,8 @@ def main() -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
+
+    validate_client_files()
 
     preset = get_preset(args.quality)
     capture = ScreenCapture(preset)
