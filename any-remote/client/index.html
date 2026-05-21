@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Any-Remote — PC CASA</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: system-ui, sans-serif;
+            margin: 0;
+            padding: 16px;
+            background: #1a1a1a;
+            color: #eee;
+        }
+        h1 { font-size: 1.25rem; margin: 0 0 12px; }
+        .toolbar { margin-bottom: 12px; }
+        button {
+            padding: 8px 16px;
+            cursor: pointer;
+            border: none;
+            border-radius: 4px;
+            background: #3b82f6;
+            color: #fff;
+            font-size: 14px;
+        }
+        button:hover { background: #2563eb; }
+        #stop { background: #dc2626; }
+        #status {
+            display: inline-block;
+            margin-left: 12px;
+            font-size: 13px;
+            color: #94a3b8;
+        }
+        #viewer {
+            position: relative;
+            max-width: 1280px;
+            border: 1px solid #334155;
+            border-radius: 6px;
+            overflow: hidden;
+            background: #000;
+        }
+        video {
+            display: block;
+            width: 100%;
+            max-height: 720px;
+            cursor: crosshair;
+        }
+        .hint {
+            margin-top: 12px;
+            font-size: 13px;
+            color: #64748b;
+        }
+    </style>
+</head>
+<body>
+    <h1>Remote desktop — PC CASA</h1>
+    <div class="toolbar">
+        <button id="start" onclick="start()">Connect</button>
+        <button id="stop" style="display:none" onclick="stop()">Disconnect</button>
+        <span id="status">Disconnected</span>
+    </div>
+
+    <div id="viewer">
+        <video id="video" autoplay playsinline muted></video>
+    </div>
+
+    <p class="hint">
+        Open this page from PC AFZ using PC CASA's Tailscale IP (e.g. http://100.x.x.x:8080).
+        Click the video to control the remote mouse after connecting.
+    </p>
+
+    <script src="client.js"></script>
+</body>
+</html>
