@@ -63,7 +63,8 @@ Example: `100.64.12.34`
 ```powershell
 cd c:\Users\joel\Documents\TCU\Any\any-remote
 .\.venv\Scripts\activate
-python host.py
+python host.py              # default: 960x540 @ 12 FPS, VP8 low-latency
+python host.py --resolution 720p --fps 15   # sharper, slightly higher latency
 ```
 
 Listens on `0.0.0.0:8080` (all interfaces, including Tailscale).
@@ -114,7 +115,8 @@ If ICE still fails, symmetric NAT may require TURN (not included yet).
 | ngrok works but no video | ngrok is signaling only; WebRTC needs UDP + srflx candidates from STUN |
 | Black video | Host running; user logged into desktop on CASA |
 | Mouse does not move | Status shows DataChannel open; pyautogui works locally on CASA |
-| High latency | Normal for MVP; lower capture resolution in `screen_track.py` if needed |
+| High latency (20s+) | Restart host; use default `540p` @ 12 FPS; hard-refresh browser; ensure old code not running |
+| Video stale | Fixed by latest-frame-only pipeline + `playoutDelayHint=0` in browser |
 
 ## Security note
 

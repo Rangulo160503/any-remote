@@ -3,9 +3,6 @@ PC CASA — controlled host.
 
 Serves the browser UI + WebRTC signaling. Streams the desktop (mss → aiortc)
 and applies remote input from the DataChannel (pyautogui).
-
-Run: python host.py
-Then on PC AFZ open: http://<casa-tailscale-ip>:8080
 """
 
 from __future__ import annotations
@@ -19,17 +16,30 @@ import ssl
 
 import pyautogui
 from aiohttp import web
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCPeerConnection, RTCRtpSender, RTCSessionDescription
 
 from ice_config import ICE_CONFIGURATION, filter_sdp_candidates
-from screen_track import ScreenCapture, ScreenStreamTrack
+from screen_track import (
+    DEFAULT_FPS,
+    HD_MAX_HEIGHT,
+    HD_MAX_WIDTH,
+    ScreenCapture,
+    ScreenStreamTrack,
+)
 from input_handler import bind_capture, handle_message
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CLIENT = os.path.join(ROOT, "client")
 
 pcs: set[RTCPeerConnection] = set()
-capture = ScreenCapture()
+capture: ScreenCapture | None = None
+
+
+def force_codec(pc: RTCPeerConnection, sender: RTCRtpSender, mime: str) -> None:
+    kind = mime.split("/")[0]
+    codecs = RTCRtpSender.getCapabilities(kind).codecs
+    transceiver = next(t for t in pc.getTransceivers() if t.sender == sender)
+    transceiver.setCodecPreferences([c for c in codecs if c.mimeType == mime])
 
 
 async def index(_: web.Request) -> web.Response:
@@ -43,6 +53,7 @@ async def javascript(_: web.Request) -> web.Response:
 
 
 async def offer(request: web.Request) -> web.Response:
+    assert capture is not None
     params = await request.json()
     offer_sdp = filter_sdp_candidates(params["sdp"])
     offer = RTCSessionDescription(sdp=offer_sdp, type=params["type"])
@@ -88,18 +99,19 @@ async def offer(request: web.Request) -> web.Response:
         @channel.on("message")
         def on_message(message) -> None:
             if isinstance(message, str):
-                logging.debug("DataChannel <= %s", message[:160])
+                logging.debug("DataChannel <= %s", message[:120])
                 handle_message(message)
 
-    pc.addTrack(ScreenStreamTrack(capture))
+    sender = pc.addTrack(ScreenStreamTrack(capture, fps=capture.fps))
+    # VP8: realtime deadline, lag-in-frames=0 (lower latency than default)
+    force_codec(pc, sender, "video/VP8")
 
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    # setLocalDescription gathers ICE (incl. STUN srflx); strip unusable host candidates.
     answer_sdp = filter_sdp_candidates(pc.localDescription.sdp)
-    logging.info("ICE answer ready (host candidates filtered, STUN srflx kept)")
+    logging.info("ICE answer ready (VP8, low-latency capture)")
 
     return web.Response(
         content_type="application/json",
@@ -110,13 +122,29 @@ async def offer(request: web.Request) -> web.Response:
 async def on_shutdown(_: web.Application) -> None:
     await asyncio.gather(*[pc.close() for pc in list(pcs)], return_exceptions=True)
     pcs.clear()
-    capture.stop()
+    if capture is not None:
+        capture.stop()
 
 
 def main() -> None:
+    global capture
+
     parser = argparse.ArgumentParser(description="Any-remote host (PC CASA)")
     parser.add_argument("--host", default="0.0.0.0", help="HTTP bind address")
     parser.add_argument("--port", type=int, default=8080, help="HTTP port")
+    parser.add_argument(
+        "--resolution",
+        choices=["540p", "720p"],
+        default="540p",
+        help="540p=960x540 (default, low latency), 720p=1280x720",
+    )
+    parser.add_argument(
+        "--fps",
+        type=int,
+        default=DEFAULT_FPS,
+        choices=[12, 15, 18],
+        help="Max capture/send FPS (default 12)",
+    )
     parser.add_argument("--cert-file", help="SSL certificate (optional HTTPS)")
     parser.add_argument("--key-file", help="SSL key file")
     parser.add_argument("-v", "--verbose", action="count")
@@ -124,6 +152,12 @@ def main() -> None:
 
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
+    if args.resolution == "720p":
+        max_w, max_h = HD_MAX_WIDTH, HD_MAX_HEIGHT
+    else:
+        max_w, max_h = 960, 540
+
+    capture = ScreenCapture(max_width=max_w, max_height=max_h, fps=args.fps)
     capture.start()
     bind_capture(capture)
 
@@ -139,10 +173,10 @@ def main() -> None:
     app.router.add_post("/offer", offer)
 
     logging.info(
-        "Host ready — signaling on port %s (STUN: %s). "
-        "Use ngrok for HTTP; WebRTC uses public srflx candidates.",
+        "Host ready port=%s %s @ %d FPS (STUN + VP8 realtime)",
         args.port,
-        "stun.l.google.com:19302",
+        args.resolution,
+        args.fps,
     )
     web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_context)
 
