@@ -1,3 +1,12 @@
+# Progress — 2026-05-21 (video recovery)
+
+## Safari video freeze recovery
+- `video-recovery.js`: monitors currentTime, readyState, track state, black screen
+- Escalation: soft play → refresh srcObject → host keyframe → hard reconnect
+- Tab foreground + bfcache `pageshow` recovery
+- HUD `vid:ok|frozen|recovering|black`
+- Host handles `{t:"keyframe"}` per peer
+
 # Progress — 2026-05-21 (production mobile)
 
 ## Phase 1 ICE/TURN

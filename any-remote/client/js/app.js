@@ -10,7 +10,6 @@ import { ConnectionManager } from "./connection-manager.js";
 import { MobileInputController } from "./mobile-input.js";
 import { GestureController } from "./gestures.js";
 import { KeyboardBridge } from "./keyboard-bridge.js";
-import { recoverVideoIfFrozen } from "./safari-compat.js";
 
 const platform = detectPlatform();
 const hud = new StatsHUD();
@@ -22,9 +21,6 @@ conn = new ConnectionManager(platform, hud, renderer, quality);
 let mobileInput = null;
 let gestures = null;
 let keyboard = null;
-let lastFrameAt = Date.now();
-let fpsFrames = 0;
-let fpsLast = performance.now();
 
 function setStatus(text, live) {
     document.getElementById("status-text").textContent = text;
@@ -141,7 +137,12 @@ function bindControls() {
     window.addEventListener("orientationchange", () => setTimeout(() => renderer.apply(), 300));
     document.addEventListener("visibilitychange", () => {
         if (!document.hidden && conn.sessionActive) {
-            recoverVideoIfFrozen(document.getElementById("video"), lastFrameAt);
+            conn.videoMonitor.onForeground();
+        }
+    });
+    window.addEventListener("pageshow", (e) => {
+        if (e.persisted && conn.sessionActive) {
+            conn.videoMonitor.onForeground();
         }
     });
 }
@@ -153,25 +154,12 @@ function stopSession() {
     setStatus("Offline", false);
 }
 
-function startFpsLoop() {
-    const video = document.getElementById("video");
-    const tick = (now) => {
-        fpsFrames++;
-        if (now - fpsLast >= 1000) {
-            const fps = fpsFrames;
-            fpsFrames = 0;
-            fpsLast = now;
-            lastFrameAt = Date.now();
-            hud.update({ fps });
-            quality.tick(hud, fps);
-            if (conn.sessionActive) recoverVideoIfFrozen(video, lastFrameAt);
-        }
-        if (video?.srcObject?.active) {
-            if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(tick);
-            else requestAnimationFrame(tick);
-        }
+function wireQualityFromMonitor() {
+    const orig = conn.videoMonitor.hooks.onFps;
+    conn.videoMonitor.hooks.onFps = (fps) => {
+        orig?.(fps);
+        quality.tick(hud, fps);
     };
-    if (video?.requestVideoFrameCallback) video.requestVideoFrameCallback(tick);
 }
 
 conn.onState = (s) => {
@@ -200,7 +188,7 @@ if (platform.mobile) {
 
 initPlatformUi();
 bindControls();
-startFpsLoop();
+wireQualityFromMonitor();
 hud.render();
 
 console.log("[any-remote] ready", platform, "relay_policy=", platform.isSafariMobile ? "relay" : "all");

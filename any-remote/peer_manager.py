@@ -38,6 +38,7 @@ _send_meta_when_connected: Callable | None = None
 _cancel_ice_watch: Callable | None = None
 _schedule_ice_failed: Callable | None = None
 _cleanup_peer_fn: Callable | None = None
+_request_keyframe_fn: Callable | None = None
 
 
 def configure(
@@ -54,11 +55,13 @@ def configure(
     cancel_ice_watch: Callable,
     schedule_ice_failed: Callable,
     cleanup_peer: Callable,
+    request_keyframe: Callable | None = None,
 ) -> None:
     global _get_relayed_track, _maybe_upgrade_capture
     global _prefer_codecs, _prefer_h264_sdp, _sdp_codec
     global _apply_bitrate, _set_bitrate, _send_meta, _send_meta_when_connected
     global _cancel_ice_watch, _schedule_ice_failed, _cleanup_peer_fn
+    global _request_keyframe_fn
     _get_relayed_track = get_relayed_track
     _maybe_upgrade_capture = maybe_upgrade_capture
     _prefer_codecs = prefer_codecs
@@ -71,6 +74,14 @@ def configure(
     _cancel_ice_watch = cancel_ice_watch
     _schedule_ice_failed = schedule_ice_failed
     _cleanup_peer_fn = cleanup_peer
+    _request_keyframe_fn = request_keyframe
+
+
+def _request_keyframe(session: PeerSession) -> None:
+    if _request_keyframe_fn is None:
+        return
+    _request_keyframe_fn(session)
+    logger.info("peer %s keyframe requested (Safari recovery)", session.label)
 
 
 def log_active_peers(reason: str = "") -> None:
@@ -204,6 +215,9 @@ async def handle_offer(params: dict) -> dict:
             if not isinstance(message, str):
                 return
             session.last_activity = time.time()
+            if '"t":"keyframe"' in message or '"t": "keyframe"' in message:
+                _request_keyframe(session)
+                return
             event = parse_adapt_event(message)
             if event:
                 apply_peer_adaptation(

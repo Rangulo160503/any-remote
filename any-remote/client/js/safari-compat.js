@@ -53,7 +53,7 @@ export async function playVideoElement(video) {
     }
 }
 
-export function attachVideoTrack(evt, video, onLayout) {
+export function attachVideoTrack(evt, video, onLayout, videoMonitor = null) {
     const track = evt.track;
     track.enabled = true;
     let stream = evt.streams?.[0];
@@ -63,15 +63,28 @@ export function attachVideoTrack(evt, video, onLayout) {
     }
     if (video.srcObject !== stream) video.srcObject = stream;
     configureLowLatencyReceiver(evt.receiver);
-    track.onunmute = () => playVideoElement(video);
-    video.addEventListener("loadedmetadata", () => onLayout?.(), { once: true });
-    playVideoElement(video);
-}
 
-export function recoverVideoIfFrozen(video, lastFrameAt, thresholdMs = 2500) {
-    if (Date.now() - lastFrameAt > thresholdMs && video.srcObject) {
-        playVideoElement(video);
-        return true;
+    if (videoMonitor) {
+        videoMonitor.bindTrack(evt);
+    } else {
+        track.onunmute = () => playVideoElement(video);
     }
-    return false;
+
+    video.addEventListener(
+        "loadedmetadata",
+        () => {
+            console.log("[any-remote] video metadata", video.videoWidth, video.videoHeight);
+            onLayout?.();
+            playVideoElement(video);
+        },
+        { once: true },
+    );
+    video.addEventListener("stalled", () => {
+        console.warn("[any-remote] video stalled");
+        videoMonitor?._scheduleRecover?.("stalled");
+    });
+    video.addEventListener("waiting", () => console.warn("[any-remote] video waiting"));
+    video.addEventListener("playing", () => console.log("[any-remote] video playing"));
+    playVideoElement(video);
+    return { track, stream };
 }

@@ -20,6 +20,7 @@ export class StatsHUD {
             packetLoss: null,
             quality: "balanced",
             iceDurationMs: null,
+            videoHealth: "idle",
         };
         this.iceStartedAt = null;
         this.els = {
@@ -62,6 +63,7 @@ export class StatsHUD {
                 `dc:${d.dcState}`,
                 d.codec,
                 `${d.fps}fps`,
+                `vid:${d.videoHealth}`,
             ].join(" · ");
         }
         if (this.els.hud) {
@@ -69,8 +71,9 @@ export class StatsHUD {
                 <span>${live ? "●" : "○"} ${d.connState}</span>
                 <span>ICE ${d.iceConnState}</span>
                 <span>${d.selectedPair}</span>
+                <span>video ${d.videoHealth}</span>
+                <span>${d.fps} fps</span>
                 <span>RTT ${d.rttMs != null ? Math.round(d.rttMs) + "ms" : "—"}</span>
-                <span>${d.bitrateKbps != null ? d.bitrateKbps + " kbps" : "—"}</span>
                 <span>loss ${d.packetLoss != null ? (d.packetLoss * 100).toFixed(1) + "%" : "—"}</span>
                 <span>${d.quality}</span>
             `;

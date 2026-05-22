@@ -13,6 +13,7 @@ import {
 import { logLocalCandidate } from "./ice-diag.js";
 import { preferReceiverH264, attachVideoTrack } from "./safari-compat.js";
 import { getClientId, clientMeta } from "./platform.js";
+import { VideoRecoveryMonitor } from "./video-recovery.js";
 
 const MAX_RECONNECT = 5;
 const RECONNECT_BASE_MS = 2000;
@@ -42,6 +43,29 @@ export class ConnectionManager {
         this.onState = null;
         this.iceConfig = null;
         this.relayOnly = false;
+        this.videoMonitor = new VideoRecoveryMonitor(platform, {
+            isSessionLive: () => this.sessionActive,
+            isPeerConnected: () =>
+                this.pc?.connectionState === "connected" && this.isIceConnected(),
+            requestKeyframe: () => {
+                if (this.dc?.readyState === "open") {
+                    this.dc.send(JSON.stringify({ t: "keyframe" }));
+                }
+            },
+            onHardRecover: () => this._videoHardRecover(),
+            onHud: (p) => this.hud.update(p),
+            onFps: (fps) => this.hud.update({ fps }),
+        });
+    }
+
+    _videoHardRecover() {
+        if (!this.sessionActive) return;
+        console.warn("[any-remote] hard video recover → media reconnect");
+        this.videoMonitor.stop();
+        const video = document.getElementById("video");
+        if (video) video.srcObject = null;
+        this.reconnectAttempts = Math.max(0, this.reconnectAttempts - 1);
+        this.connect();
     }
 
     _setState(s) {
@@ -140,9 +164,13 @@ export class ConnectionManager {
             } catch (_) {}
             this.pc = null;
         }
-        const video = document.getElementById("video");
-        if (video) video.srcObject = null;
-        this.hud.update({ dcState: "closed", connState: "closed", iceConnState: "closed" });
+        this.videoMonitor.clearMedia();
+        this.hud.update({
+            dcState: "closed",
+            connState: "closed",
+            iceConnState: "closed",
+            videoHealth: "idle",
+        });
     }
 
     _wirePc(pc) {
@@ -192,9 +220,14 @@ export class ConnectionManager {
 
         pc.addEventListener("track", (evt) => {
             if (evt.track.kind !== "video") return;
-            attachVideoTrack(evt, document.getElementById("video"), () =>
-                this.renderer.apply(),
+            attachVideoTrack(
+                evt,
+                document.getElementById("video"),
+                () => this.renderer.apply(),
+                this.videoMonitor,
             );
+            this.videoMonitor.onNewSession();
+            this.videoMonitor.start();
         });
     }
 
@@ -226,6 +259,7 @@ export class ConnectionManager {
         if (this.connecting || now - this.lastConnectAt < CONNECT_DEBOUNCE_MS) return;
         this.connecting = true;
         this.lastConnectAt = now;
+        this.videoMonitor.stop();
         this._cleanup();
         this._setState("connecting");
         this.hud.markIceStart();

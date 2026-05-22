@@ -315,6 +315,7 @@ def _read_client_file(path: Path, label: str) -> str:
 REQUIRED_CLIENT = (
     (INDEX_HTML, "index.html"),
     (CLIENT_DIR / "js" / "app.js", "js/app.js"),
+    (CLIENT_DIR / "js" / "video-recovery.js", "js/video-recovery.js"),
     (CLIENT_DIR / "client.css", "client.css"),
     (CLIENT_JS, "client.js"),
 )
@@ -431,6 +432,11 @@ def main() -> None:
 
     validate_client_files()
 
+    def request_keyframe_for_session(session: PeerSession) -> None:
+        senders = session.pc.getSenders()
+        if senders:
+            request_sender_keyframe(senders[0])
+
     peer_manager.configure(
         get_relayed_track=get_relayed_video_track,
         maybe_upgrade_capture=maybe_upgrade_shared_capture,
@@ -444,6 +450,7 @@ def main() -> None:
         cancel_ice_watch=cancel_ice_watch,
         schedule_ice_failed=schedule_ice_failed_cleanup,
         cleanup_peer=cleanup_peer,
+        request_keyframe=request_keyframe_for_session,
     )
 
     preset = get_preset(args.quality)
