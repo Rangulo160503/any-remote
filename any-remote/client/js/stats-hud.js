@@ -21,14 +21,42 @@ export class StatsHUD {
             quality: "balanced",
             iceDurationMs: null,
             videoHealth: "idle",
+            playing: false,
+            paused: true,
+            readyState: 0,
+            ctDelta: 0,
+            framesDecoded: 0,
+            freezeDetected: false,
         };
         this.iceStartedAt = null;
         this.els = {
             conn: document.getElementById("info-conn"),
             hud: document.getElementById("hud-panel"),
+            watchdog: document.getElementById("video-watchdog"),
             coords: document.getElementById("info-coords"),
             stream: document.getElementById("info-stream"),
         };
+    }
+
+    updateWatchdog(sample) {
+        if (!sample) return;
+        this.update({
+            playing: sample.playing,
+            paused: sample.paused,
+            readyState: sample.readyState,
+            ctDelta: sample.ctDelta,
+            framesDecoded: sample.framesDecoded,
+            freezeDetected: sample.freezeDetected,
+        });
+        if (!this.els.watchdog) return;
+        const d = this.data;
+        this.els.watchdog.textContent = [
+            d.playing ? "▶" : "⏸",
+            `rs:${d.readyState}`,
+            `Δt:${(d.ctDelta || 0).toFixed(2)}`,
+            `dec:${d.framesDecoded}`,
+            d.freezeDetected ? "FREEZE" : "ok",
+        ].join(" ");
     }
 
     setQuality(q) {
@@ -136,6 +164,7 @@ export class StatsHUD {
                         ? inbound.packetsLost /
                           Math.max(1, inbound.packetsReceived + inbound.packetsLost)
                         : 0,
+                    framesDecoded: inbound.framesDecoded ?? this.data.framesDecoded,
                 });
             }
         } catch (err) {

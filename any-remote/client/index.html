@@ -10,6 +10,14 @@
 </head>
 <body>
     <div id="app">
+        <div id="connect-splash" class="connect-splash hidden">
+            <div class="splash-card">
+                <h1>Any-Remote</h1>
+                <p>Tap to start a secure remote session</p>
+                <button id="splash-connect" type="button" class="primary splash-btn">Tap to Connect</button>
+            </div>
+        </div>
+
         <header class="toolbar" id="desktop-toolbar">
             <div class="toolbar-group">
                 <button id="start" class="primary" type="button">Connect</button>
@@ -44,10 +52,11 @@
         </header>
 
         <div id="hud-panel" class="hud-panel" aria-live="polite"></div>
+        <div id="video-watchdog" class="video-watchdog hidden" aria-live="polite">—</div>
 
         <main class="viewport" id="viewport">
             <div id="desktop-container">
-                <video id="video" autoplay playsinline webkit-playsinline muted disablePictureInPicture tabindex="0"></video>
+                <div id="video-mount"></div>
                 <div id="touch-overlay" class="touch-overlay"></div>
                 <div id="virtual-cursor" class="virtual-cursor"></div>
             </div>

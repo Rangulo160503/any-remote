@@ -1,4 +1,6 @@
-/** Viewport layout, zoom, safe-area, orientation. */
+/** Viewport layout — Safari-safe: never remount video/container DOM. */
+
+import { getRemoteVideoSingleton } from "./video-singleton.js";
 
 export class Renderer {
     constructor(platform) {
@@ -6,9 +8,14 @@ export class Renderer {
         this.zoomLevel = 100;
         this.displayMode = "fit";
         this.hostMeta = null;
-        this.video = document.getElementById("video");
         this.container = document.getElementById("desktop-container");
         this.viewport = document.getElementById("viewport");
+        this.video = getRemoteVideoSingleton();
+    }
+
+    /** Detach stream only — singleton video element survives peer reconnect. */
+    detachVideo() {
+        if (this.video) this.video.srcObject = null;
     }
 
     streamSize() {

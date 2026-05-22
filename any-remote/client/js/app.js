@@ -1,5 +1,5 @@
 /**
- * Any-Remote — modular entry (desktop + Citrix-like mobile UX).
+ * Any-Remote — modular entry (Safari-stable rendering pipeline).
  */
 
 import { detectPlatform } from "./platform.js";
@@ -10,8 +10,18 @@ import { ConnectionManager } from "./connection-manager.js";
 import { MobileInputController } from "./mobile-input.js";
 import { GestureController } from "./gestures.js";
 import { KeyboardBridge } from "./keyboard-bridge.js";
+import {
+    getRemoteVideoSingleton,
+    forcePlayVideo,
+    bindVideoLifecycleOnce,
+} from "./video-singleton.js";
 
 const platform = detectPlatform();
+const needsGestureConnect = platform.isSafariMobile;
+
+getRemoteVideoSingleton();
+bindVideoLifecycleOnce();
+
 const hud = new StatsHUD();
 const renderer = new Renderer(platform);
 let conn;
@@ -21,6 +31,7 @@ conn = new ConnectionManager(platform, hud, renderer, quality);
 let mobileInput = null;
 let gestures = null;
 let keyboard = null;
+let controlsBound = false;
 
 function setStatus(text, live) {
     document.getElementById("status-text").textContent = text;
@@ -36,11 +47,23 @@ function initPlatformUi() {
     quality.mode = "mobile";
     document.getElementById("desktop-toolbar")?.classList.add("hide-mobile");
     document.getElementById("mobile-toolbar")?.classList.remove("hidden");
+    if (needsGestureConnect) {
+        document.getElementById("video-watchdog")?.classList.remove("hidden");
+    }
+}
+
+function beginSession() {
+    const splash = document.getElementById("connect-splash");
+    splash?.classList.add("hidden");
+    document.getElementById("start").style.display = "none";
+    document.getElementById("stop").style.display = "inline-block";
+    setStatus("Connecting…", false);
+    forcePlayVideo();
+    conn.start();
 }
 
 function bindDesktopPointer() {
-    const video = document.getElementById("video");
-    if (!video) return;
+    const video = renderer.video;
     const drag = { active: false, button: null };
     let lastMove = 0;
 
@@ -74,12 +97,13 @@ function bindDesktopPointer() {
 }
 
 function bindControls() {
-    document.getElementById("start")?.addEventListener("click", () => {
-        document.getElementById("start").style.display = "none";
-        document.getElementById("stop").style.display = "inline-block";
-        setStatus("Connecting…", false);
-        conn.start();
-    });
+    if (controlsBound) return;
+    controlsBound = true;
+
+    const splashBtn = document.getElementById("splash-connect");
+    splashBtn?.addEventListener("click", () => beginSession(), { once: false });
+
+    document.getElementById("start")?.addEventListener("click", () => beginSession());
     document.getElementById("stop")?.addEventListener("click", stopSession);
     document.getElementById("m-stop")?.addEventListener("click", stopSession);
     document.getElementById("m-reconnect")?.addEventListener("click", () => {
@@ -135,22 +159,17 @@ function bindControls() {
 
     window.addEventListener("resize", () => renderer.apply());
     window.addEventListener("orientationchange", () => setTimeout(() => renderer.apply(), 300));
-    document.addEventListener("visibilitychange", () => {
-        if (!document.hidden && conn.sessionActive) {
-            conn.videoMonitor.onForeground();
-        }
-    });
-    window.addEventListener("pageshow", (e) => {
-        if (e.persisted && conn.sessionActive) {
-            conn.videoMonitor.onForeground();
-        }
-    });
 }
 
 function stopSession() {
     conn.stop();
     document.getElementById("stop").style.display = "none";
-    document.getElementById("start").style.display = "inline-block";
+    if (needsGestureConnect) {
+        document.getElementById("start").style.display = "none";
+        document.getElementById("connect-splash")?.classList.remove("hidden");
+    } else {
+        document.getElementById("start").style.display = "inline-block";
+    }
     setStatus("Offline", false);
 }
 
@@ -191,4 +210,11 @@ bindControls();
 wireQualityFromMonitor();
 hud.render();
 
-console.log("[any-remote] ready", platform, "relay_policy=", platform.isSafariMobile ? "relay" : "all");
+if (needsGestureConnect) {
+    document.getElementById("start").style.display = "none";
+    document.getElementById("connect-splash")?.classList.remove("hidden");
+} else {
+    document.getElementById("connect-splash")?.classList.add("hidden");
+}
+
+console.log("[any-remote] ready singleton video", platform.isSafariMobile ? "gesture-connect" : "direct-connect");

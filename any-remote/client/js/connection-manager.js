@@ -1,6 +1,5 @@
 /**
- * WebRTC connection manager — signaling, ICE, media, input channel.
- * State machine: idle → connecting → connected → reconnecting → failed
+ * WebRTC connection manager — peer-only reconnect (never reload page / never recreate video).
  */
 
 import {
@@ -14,6 +13,8 @@ import { logLocalCandidate } from "./ice-diag.js";
 import { preferReceiverH264, attachVideoTrack } from "./safari-compat.js";
 import { getClientId, clientMeta } from "./platform.js";
 import { VideoRecoveryMonitor } from "./video-recovery.js";
+import { mungeSdpForSafariMobile } from "./sdp-munge.js";
+import { stopAutoplayRetryLoop } from "./video-singleton.js";
 
 const MAX_RECONNECT = 5;
 const RECONNECT_BASE_MS = 2000;
@@ -52,18 +53,19 @@ export class ConnectionManager {
                     this.dc.send(JSON.stringify({ t: "keyframe" }));
                 }
             },
-            onHardRecover: () => this._videoHardRecover(),
+            onHardRecover: () => this._peerOnlyReconnect(),
             onHud: (p) => this.hud.update(p),
             onFps: (fps) => this.hud.update({ fps }),
+            onWatchdog: (s) => this.hud.updateWatchdog(s),
         });
     }
 
-    _videoHardRecover() {
+    /** Reconnect RTCPeerConnection only — video element untouched. */
+    _peerOnlyReconnect() {
         if (!this.sessionActive) return;
-        console.warn("[any-remote] hard video recover → media reconnect");
+        console.warn("[any-remote] peer-only reconnect (no page reload)");
         this.videoMonitor.stop();
-        const video = document.getElementById("video");
-        if (video) video.srcObject = null;
+        this.renderer.detachVideo();
         this.reconnectAttempts = Math.max(0, this.reconnectAttempts - 1);
         this.connect();
     }
@@ -96,7 +98,10 @@ export class ConnectionManager {
         if (ready && !this.inputReady) {
             this.inputReady = true;
             this._flushDcQueue();
-            this.send({ t: "quality", mode: this.quality.effectiveQuality(this.quality.mode) });
+            this.send({
+                t: "quality",
+                mode: this.quality.effectiveQuality(this.quality.mode),
+            });
             this.onInputReady?.();
         } else if (!ready) {
             this.inputReady = false;
@@ -134,7 +139,7 @@ export class ConnectionManager {
         }
         this.reconnectAttempts++;
         const delay = this._backoffMs();
-        console.log("[any-remote] reconnect", this.reconnectAttempts, "in", delay);
+        console.log("[any-remote] peer reconnect", this.reconnectAttempts, "in", delay);
         this._setState("reconnecting");
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = setTimeout(() => {
@@ -143,7 +148,7 @@ export class ConnectionManager {
         }, delay);
     }
 
-    _cleanup() {
+    _cleanupPeerOnly() {
         clearTimeout(this.reconnectTimer);
         clearTimeout(this.disconnectTimer);
         clearInterval(this.statsTimer);
@@ -164,12 +169,12 @@ export class ConnectionManager {
             } catch (_) {}
             this.pc = null;
         }
-        this.videoMonitor.clearMedia();
+        this.videoMonitor.stop();
+        this.renderer.detachVideo();
         this.hud.update({
             dcState: "closed",
             connState: "closed",
             iceConnState: "closed",
-            videoHealth: "idle",
         });
     }
 
@@ -206,7 +211,7 @@ export class ConnectionManager {
                 document.body.classList.remove("session-live");
                 this._scheduleReconnect();
             } else if (pc.connectionState === "disconnected") {
-                const delay = this.platform.isSafariMobile ? 6000 : 3000;
+                const delay = this.platform.isSafariMobile ? 8000 : 3000;
                 this.disconnectTimer = setTimeout(() => {
                     if (
                         this.pc?.connectionState === "disconnected" &&
@@ -222,7 +227,7 @@ export class ConnectionManager {
             if (evt.track.kind !== "video") return;
             attachVideoTrack(
                 evt,
-                document.getElementById("video"),
+                this.renderer.video,
                 () => this.renderer.apply(),
                 this.videoMonitor,
             );
@@ -254,13 +259,19 @@ export class ConnectionManager {
         });
     }
 
+    _mungeSdp(sdp) {
+        let out = filterSdpCandidates(sdp, this.relayOnly);
+        out = mungeSdpForSafariMobile(out, this.platform);
+        return out;
+    }
+
     async connect() {
         const now = Date.now();
         if (this.connecting || now - this.lastConnectAt < CONNECT_DEBOUNCE_MS) return;
         this.connecting = true;
         this.lastConnectAt = now;
         this.videoMonitor.stop();
-        this._cleanup();
+        this._cleanupPeerOnly();
         this._setState("connecting");
         this.hud.markIceStart();
 
@@ -270,8 +281,6 @@ export class ConnectionManager {
             console.log(
                 "[any-remote] ICE policy",
                 this.iceConfig.iceTransportPolicy,
-                "safari=",
-                this.platform.isSafariMobile,
                 clientMeta(this.platform),
             );
 
@@ -291,10 +300,7 @@ export class ConnectionManager {
             await pc.setLocalDescription(await pc.createOffer());
             await waitForIceGathering(pc, this.platform);
 
-            const sdp = filterSdpCandidates(
-                pc.localDescription.sdp,
-                this.relayOnly,
-            );
+            let sdp = this._mungeSdp(pc.localDescription.sdp);
             console.log("[any-remote] offer ICE", countSdpCandidates(sdp));
 
             const body = {
@@ -321,7 +327,7 @@ export class ConnectionManager {
             });
             if (!r.ok) throw new Error("signaling " + r.status);
             const answer = await r.json();
-            answer.sdp = filterSdpCandidates(answer.sdp, answer.relayOnly);
+            answer.sdp = this._mungeSdp(answer.sdp);
             console.log("[any-remote] answer ICE", countSdpCandidates(answer.sdp));
             this.hud.update({ codec: answer.codec || "—" });
             await pc.setRemoteDescription(answer);
@@ -348,6 +354,8 @@ export class ConnectionManager {
         this.sessionActive = false;
         this._setState("idle");
         document.body.classList.remove("session-live");
-        this._cleanup();
+        stopAutoplayRetryLoop();
+        this._cleanupPeerOnly();
+        this.videoMonitor.clearMedia();
     }
 }

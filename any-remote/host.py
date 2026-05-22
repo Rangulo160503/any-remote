@@ -315,7 +315,10 @@ def _read_client_file(path: Path, label: str) -> str:
 REQUIRED_CLIENT = (
     (INDEX_HTML, "index.html"),
     (CLIENT_DIR / "js" / "app.js", "js/app.js"),
+    (CLIENT_DIR / "js" / "video-singleton.js", "js/video-singleton.js"),
     (CLIENT_DIR / "js" / "video-recovery.js", "js/video-recovery.js"),
+    (CLIENT_DIR / "js" / "media-stream.js", "js/media-stream.js"),
+    (CLIENT_DIR / "js" / "sdp-munge.js", "js/sdp-munge.js"),
     (CLIENT_DIR / "client.css", "client.css"),
     (CLIENT_JS, "client.js"),
 )
