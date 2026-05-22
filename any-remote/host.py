@@ -22,13 +22,10 @@ from aiohttp import web
 from aiortc import RTCPeerConnection, RTCRtpSender, RTCSessionDescription
 from aiortc.contrib.media import MediaRelay
 
-from ice_config import (
-    ICE_CONFIGURATION,
-    count_sdp_candidates,
-    filter_sdp_candidates,
-    ice_servers_json,
-)
-from input_handler import bind_capture, handle_message
+from ice_config import ice_servers_json
+from input_handler import bind_capture
+import peer_manager
+from peer_manager import client_index, handle_offer, pcs, sessions
 from peer_session import PeerSession
 from screen_track import ScreenCapture, ScreenStreamTrack
 from stream_config import DEFAULT_QUALITY, QualityPreset, get_preset, max_preset
@@ -37,10 +34,6 @@ ROOT = Path(__file__).resolve().parent
 CLIENT_DIR = ROOT / "client"
 INDEX_HTML = CLIENT_DIR / "index.html"
 CLIENT_JS = CLIENT_DIR / "client.js"
-
-# Active peer connections (one RTCPeerConnection per viewer).
-pcs: set[RTCPeerConnection] = set()
-sessions: dict[str, PeerSession] = {}
 
 capture: Optional[ScreenCapture] = None
 shared_source: Optional[ScreenStreamTrack] = None
@@ -216,6 +209,10 @@ async def cleanup_peer(session: PeerSession, reason: str) -> None:
     cancel_ice_watch(session)
     peer_id = session.id
     pc = session.pc
+    session.state = "closed"
+
+    if session.client_id and client_index.get(session.client_id) == peer_id:
+        client_index.pop(session.client_id, None)
 
     sessions.pop(peer_id, None)
     pcs.discard(pc)
@@ -299,21 +296,11 @@ def send_meta(channel, session: PeerSession, codec: str) -> None:
     )
 
 
-def handle_peer_quality(raw: str, session: PeerSession) -> None:
-    try:
-        event = json.loads(raw)
-    except json.JSONDecodeError:
-        return
-    if event.get("t") != "quality":
-        return
-
-    name = event.get("mode", DEFAULT_QUALITY)
-    session.preset = get_preset(name)
-    logging.info("peer %s quality -> %s", session.label, name)
-
+def set_bitrate_for_session(session: PeerSession, bitrate: int) -> bool:
     senders = session.pc.getSenders()
     if senders:
-        set_sender_bitrate(senders[0], session.preset.bitrate)
+        return set_sender_bitrate(senders[0], bitrate)
+    return False
 
 
 def _read_client_file(path: Path, label: str) -> str:
@@ -325,8 +312,16 @@ def _read_client_file(path: Path, label: str) -> str:
     return text
 
 
+REQUIRED_CLIENT = (
+    (INDEX_HTML, "index.html"),
+    (CLIENT_DIR / "js" / "app.js", "js/app.js"),
+    (CLIENT_DIR / "client.css", "client.css"),
+    (CLIENT_JS, "client.js"),
+)
+
+
 def validate_client_files() -> None:
-    for path, name in ((INDEX_HTML, "index.html"), (CLIENT_JS, "client.js")):
+    for path, name in REQUIRED_CLIENT:
         if path.is_file():
             logging.info("client file ok: %s", path)
         else:
@@ -346,8 +341,27 @@ async def index(request: web.Request) -> web.Response:
 
 
 async def ice_config(request: web.Request) -> web.Response:
-    logging.debug("GET /ice-config from %s", request.remote)
-    return web.json_response(ice_servers_json())
+    mobile = request.query.get("mobile") == "1"
+    safari = request.query.get("safari") == "1"
+    logging.debug("GET /ice-config from %s mobile=%s safari=%s", request.remote, mobile, safari)
+    return web.json_response(ice_servers_json(mobile=mobile, safari=safari))
+
+
+def _serve_bytes(path: Path, ctype: str) -> web.Response:
+    if not path.is_file():
+        raise web.HTTPNotFound()
+    return web.Response(body=path.read_bytes(), content_type=ctype)
+
+
+async def serve_client_css(_: web.Request) -> web.Response:
+    return _serve_bytes(CLIENT_DIR / "client.css", "text/css")
+
+
+async def serve_client_js(request: web.Request) -> web.Response:
+    rel = request.match_info.get("path", "")
+    if ".." in rel:
+        raise web.HTTPForbidden()
+    return _serve_bytes(CLIENT_DIR / "js" / rel, "application/javascript")
 
 
 async def javascript(request: web.Request) -> web.Response:
@@ -362,120 +376,9 @@ async def javascript(request: web.Request) -> web.Response:
 
 async def offer(request: web.Request) -> web.Response:
     assert capture is not None
-
     params = await request.json()
-    quality = params.get("quality", DEFAULT_QUALITY)
-    mobile = bool(params.get("mobile"))
-    safari = bool(params.get("safari") or params.get("ios"))
-    if mobile and quality == "balanced":
-        quality = "mobile"
-
-    preset = get_preset(quality)
-    maybe_upgrade_shared_capture(preset)
-
-    offer_sdp = filter_sdp_candidates(params["sdp"])
-    offer_ice = count_sdp_candidates(offer_sdp)
-    remote = RTCSessionDescription(sdp=offer_sdp, type=params["type"])
-
-    pc = RTCPeerConnection(configuration=ICE_CONFIGURATION)
-    session = PeerSession(pc=pc, preset=preset, mobile=mobile, safari=safari)
-
-    pcs.add(pc)
-    sessions[session.id] = session
-
-    h264_first = mobile or safari
-    ice_fail_delay = 20.0 if safari else 10.0
-    logging.info(
-        "peer %s created mobile=%s safari=%s quality=%s h264=%s",
-        session.label,
-        mobile,
-        safari,
-        preset.name,
-        h264_first,
-    )
-    log_active_peers("new peer")
-
-    @pc.on("connectionstatechange")
-    async def on_connectionstatechange() -> None:
-        state = pc.connectionState
-        logging.info("peer %s connectionState=%s", session.label, state)
-        if state == "connected":
-            cancel_ice_watch(session)
-            await apply_peer_bitrate(session)
-        elif state in ("failed", "closed"):
-            cancel_ice_watch(session)
-            await cleanup_peer(session, state)
-
-    @pc.on("iceconnectionstatechange")
-    async def on_iceconnectionstatechange() -> None:
-        ice = pc.iceConnectionState
-        logging.info("peer %s iceConnectionState=%s", session.label, ice)
-        if ice in ("connected", "completed"):
-            cancel_ice_watch(session)
-        elif ice == "failed":
-            await schedule_ice_failed_cleanup(session, ice_fail_delay)
-
-    @pc.on("datachannel")
-    def on_datachannel(channel) -> None:
-        if channel.label != "input":
-            return
-
-        @channel.on("open")
-        def on_open() -> None:
-            logging.info("peer %s DataChannel open", session.label)
-            asyncio.ensure_future(_send_meta_when_connected(session, channel))
-
-        @channel.on("close")
-        def on_close() -> None:
-            logging.info("peer %s DataChannel closed", session.label)
-
-        @channel.on("message")
-        def on_message(message) -> None:
-            if not isinstance(message, str):
-                return
-            if '"t":"quality"' in message or '"t": "quality"' in message:
-                handle_peer_quality(message, session)
-                return
-            logging.debug("peer %s dc <= %s", session.label, message[:80])
-            handle_message(message)
-
-    session.video_track = get_relayed_video_track()
-    sender = pc.addTrack(session.video_track)
-
-    session.codec = prefer_sender_codecs(pc, sender, h264_first=h264_first)
-
-    await pc.setRemoteDescription(remote)
-    answer = await pc.createAnswer()
-    await pc.setLocalDescription(answer)
-
-    answer_sdp = filter_sdp_candidates(pc.localDescription.sdp)
-    if h264_first:
-        answer_sdp = prefer_h264_in_answer_sdp(answer_sdp)
-    answer_ice = count_sdp_candidates(answer_sdp)
-    negotiated = sdp_video_codec(answer_sdp)
-    logging.info(
-        "peer %s answer codec=%s negotiated=%s bitrate=%d fps=%d offer_ice=%s answer_ice=%s",
-        session.label,
-        session.codec,
-        negotiated,
-        preset.bitrate,
-        preset.fps,
-        offer_ice,
-        answer_ice,
-    )
-
-    return web.Response(
-        content_type="application/json",
-        text=json.dumps(
-            {
-                "sdp": answer_sdp,
-                "type": pc.localDescription.type,
-                "quality": preset.name,
-                "peerId": session.id,
-                "codec": negotiated,
-            }
-        ),
-    )
+    result = await handle_offer(params)
+    return web.json_response(result)
 
 
 async def stats(_: web.Request) -> web.Response:
@@ -528,6 +431,21 @@ def main() -> None:
 
     validate_client_files()
 
+    peer_manager.configure(
+        get_relayed_track=get_relayed_video_track,
+        maybe_upgrade_capture=maybe_upgrade_shared_capture,
+        prefer_codecs=prefer_sender_codecs,
+        prefer_h264_sdp=prefer_h264_in_answer_sdp,
+        sdp_codec=sdp_video_codec,
+        apply_bitrate=apply_peer_bitrate,
+        set_bitrate=set_bitrate_for_session,
+        send_meta=send_meta,
+        send_meta_when_connected=_send_meta_when_connected,
+        cancel_ice_watch=cancel_ice_watch,
+        schedule_ice_failed=schedule_ice_failed_cleanup,
+        cleanup_peer=cleanup_peer,
+    )
+
     preset = get_preset(args.quality)
     capture = ScreenCapture(preset)
     capture.start()
@@ -542,9 +460,21 @@ def main() -> None:
     app.on_shutdown.append(on_shutdown)
     app.router.add_get("/", index)
     app.router.add_get("/client.js", javascript)
+    app.router.add_get("/client.css", serve_client_css)
+    app.router.add_get(r"/js/{path:.+}", serve_client_js)
     app.router.add_get("/ice-config", ice_config)
     app.router.add_get("/stats", stats)
     app.router.add_post("/offer", offer)
+
+    async def start_gc(_app: web.Application) -> None:
+        async def loop() -> None:
+            while True:
+                await asyncio.sleep(30)
+                await peer_manager.cleanup_stale_peers()
+
+        asyncio.create_task(loop())
+
+    app.on_startup.append(start_gc)
 
     logging.info("Host :%s capture=%s (multi-peer + MediaRelay)", args.port, preset.name)
     web.run_app(app, host=args.host, port=args.port, ssl_context=ssl_context)

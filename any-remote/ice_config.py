@@ -37,7 +37,19 @@ ICE_SERVERS_BROWSER: list[dict[str, Any]] = [
         "username": TURN_USERNAME,
         "credential": TURN_CREDENTIAL,
     },
+    {
+        "urls": "turns:standard.relay.metered.ca:443",
+        "username": TURN_USERNAME,
+        "credential": TURN_CREDENTIAL,
+    },
 ]
+
+
+def ice_policy_for_client(mobile: bool, safari: bool) -> dict[str, str]:
+    """Hints returned alongside iceServers for browser policy resolver."""
+    if mobile and safari:
+        return {"iceTransportPolicy": "relay"}
+    return {"iceTransportPolicy": "all"}
 
 _USABLE_TYPES = frozenset({"srflx", "relay", "prflx"})
 
@@ -57,9 +69,10 @@ ICE_CONFIGURATION = RTCConfiguration(
 )
 
 
-def ice_servers_json() -> dict[str, list[dict[str, Any]]]:
+def ice_servers_json(mobile: bool = False, safari: bool = False) -> dict[str, Any]:
     """Payload for GET /ice-config (browser RTCPeerConnection)."""
-    return {"iceServers": ICE_SERVERS_BROWSER}
+    policy = ice_policy_for_client(mobile, safari)
+    return {"iceServers": ICE_SERVERS_BROWSER, **policy}
 
 
 def count_sdp_candidates(sdp: str) -> dict[str, int]:

@@ -2,180 +2,21 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8"/>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"/>
     <meta name="apple-mobile-web-app-capable" content="yes"/>
     <meta name="format-detection" content="telephone=no"/>
     <title>Any-Remote</title>
-    <style>
-        * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-        html, body { height: 100%; margin: 0; }
-        body {
-            font-family: system-ui, -apple-system, sans-serif;
-            background: #0c0e12;
-            color: #e8eaed;
-            overflow: hidden;
-        }
-
-        #app {
-            display: flex;
-            flex-direction: column;
-            height: 100vh;
-            height: 100dvh;
-            width: 100%;
-        }
-
-        .toolbar {
-            flex: 0 0 auto;
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 6px 10px;
-            padding: 8px 10px;
-            background: #161b22;
-            border-bottom: 1px solid #2d333b;
-            z-index: 10;
-        }
-
-        .toolbar-group {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            flex-wrap: wrap;
-        }
-
-        .toolbar-group + .toolbar-group {
-            padding-left: 10px;
-            border-left: 1px solid #30363d;
-        }
-
-        .toolbar label {
-            font-size: 11px;
-            color: #8b949e;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-        }
-
-        button, select {
-            font-size: 12px;
-            border-radius: 6px;
-            border: 1px solid #30363d;
-            background: #21262d;
-            color: #e6edf3;
-            padding: 8px 10px;
-            cursor: pointer;
-            touch-action: manipulation;
-        }
-        button.primary { background: #238636; border-color: #238636; }
-        button.danger { background: #da3633; border-color: #da3633; }
-        button.active { outline: 2px solid #388bfd; }
-
-        #zoom-slider { width: 72px; }
-
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #6e7681;
-        }
-        .status-dot.live { background: #3fb950; }
-        #status-text { font-size: 12px; color: #8b949e; }
-
-        .info-line {
-            font-size: 10px;
-            font-family: ui-monospace, monospace;
-            color: #6e7681;
-        }
-
-        .toolbar-diag {
-            flex: 1 1 100%;
-            min-width: 0;
-        }
-
-        #info-conn {
-            display: block;
-            max-width: 100%;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-
-        .viewport {
-            flex: 1 1 auto;
-            min-height: 0;
-            overflow: auto;
-            -webkit-overflow-scrolling: touch;
-            display: flex;
-            justify-content: center;
-            align-items: flex-start;
-            padding: 8px;
-            background: #080a0d;
-        }
-
-        #desktop-container {
-            flex: 0 0 auto;
-            background: #000;
-            border-radius: 4px;
-            line-height: 0;
-        }
-
-        #desktop-container, #video {
-            user-select: none;
-            -webkit-user-select: none;
-            -webkit-user-drag: none;
-            touch-action: none;
-        }
-
-        body.remote-drag { user-select: none; }
-
-        #video {
-            display: block;
-            object-fit: fill;
-            cursor: crosshair;
-            pointer-events: auto;
-            outline: none;
-            background: #000;
-        }
-
-        body.is-safari #video,
-        body.is-mobile #video {
-            image-rendering: -webkit-optimize-contrast;
-        }
-
-        body:not(.is-mobile) #video {
-            image-rendering: auto;
-        }
-
-        /* Mobile layout */
-        body.is-mobile .toolbar-group + .toolbar-group {
-            border-left: none;
-            padding-left: 0;
-        }
-        body.is-mobile .toolbar {
-            padding: 6px 8px;
-        }
-        body.is-mobile .info-line.hide-mobile {
-            display: none;
-        }
-        body.is-mobile #btn-actual,
-        body.is-mobile #btn-reset-zoom {
-            display: none;
-        }
-        body.is-mobile .viewport {
-            padding: 4px;
-        }
-    </style>
+    <link rel="stylesheet" href="/client.css"/>
 </head>
 <body>
     <div id="app">
-        <header class="toolbar">
+        <header class="toolbar" id="desktop-toolbar">
             <div class="toolbar-group">
                 <button id="start" class="primary" type="button">Connect</button>
                 <button id="stop" class="danger" type="button" style="display:none">Disconnect</button>
                 <span class="status-dot" id="status-dot"></span>
                 <span id="status-text">Offline</span>
             </div>
-
             <div class="toolbar-group">
                 <label>Zoom
                     <input type="range" id="zoom-slider" min="50" max="200" step="25" value="100"/>
@@ -185,7 +26,6 @@
                 <button type="button" id="btn-actual">1:1</button>
                 <button type="button" id="btn-reset-zoom">Reset</button>
             </div>
-
             <div class="toolbar-group">
                 <label>Quality
                     <select id="quality-select">
@@ -196,7 +36,6 @@
                     </select>
                 </label>
             </div>
-
             <div class="toolbar-group toolbar-diag">
                 <span class="info-line" id="info-coords">—</span>
                 <span class="info-line hide-mobile" id="info-stream">—</span>
@@ -204,21 +43,38 @@
             </div>
         </header>
 
+        <div id="hud-panel" class="hud-panel" aria-live="polite"></div>
+
         <main class="viewport" id="viewport">
             <div id="desktop-container">
-                <video
-                    id="video"
-                    autoplay
-                    playsinline
-                    webkit-playsinline
-                    muted
-                    disablePictureInPicture
-                    tabindex="0"
-                ></video>
+                <video id="video" autoplay playsinline webkit-playsinline muted disablePictureInPicture tabindex="0"></video>
+                <div id="touch-overlay" class="touch-overlay"></div>
+                <div id="virtual-cursor" class="virtual-cursor"></div>
             </div>
         </main>
-    </div>
 
-    <script src="client.js"></script>
+        <nav id="mobile-toolbar" class="mobile-toolbar hidden collapsed">
+            <button type="button" id="m-toggle-bar" class="m-fab" title="Toolbar">☰</button>
+            <div class="m-bar-inner">
+                <button type="button" id="m-reconnect">↻</button>
+                <button type="button" id="m-stop" class="danger">✕</button>
+                <button type="button" id="m-keyboard">⌨</button>
+                <button type="button" id="btn-touch-mode" class="active">Trackpad</button>
+                <button type="button" id="btn-touch-direct">Direct</button>
+                <button type="button" id="m-fit">Fit</button>
+                <select id="m-quality">
+                    <option value="mobile">Mobile</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="high">High</option>
+                </select>
+                <label class="m-sens">Sens
+                    <input type="range" id="sensitivity-slider" min="0.6" max="2.5" step="0.1" value="1.2"/>
+                </label>
+            </div>
+        </nav>
+
+        <input type="text" id="hidden-input" class="hidden-input hidden" autocomplete="off" autocorrect="off" autocapitalize="off" enterkeyhint="done"/>
+    </div>
+    <script type="module" src="/js/app.js"></script>
 </body>
 </html>

@@ -14,8 +14,21 @@ any-remote/
 ├── requirements.txt
 ├── README.md
 └── client/
-    ├── index.html       # Controller UI (served by host)
-    └── client.js        # WebRTC viewer + input sender
+    ├── index.html       # Controller UI
+    ├── client.css       # Desktop + mobile (Citrix-like) styles
+    ├── client.js        # Legacy shim → js/app.js
+    └── js/
+        ├── app.js               # Entry
+        ├── connection-manager.js
+        ├── ice-policy.js        # relay-only Safari mobile
+        ├── mobile-input.js      # Trackpad + direct touch
+        ├── gestures.js
+        ├── keyboard-bridge.js
+        ├── stats-hud.js
+        └── ...
+├── peer_manager.py    # Per-viewer lifecycle + dedup
+├── ice_policy.py      # Relay-only SDP on Safari mobile
+└── quality_adaptation.py
 ```
 
 ## How the libraries work together
@@ -118,7 +131,9 @@ $env:TURN_CREDENTIAL = "your-secret"
 python host.py -v
 ```
 
-**iPhone / LTE:** needs TURN relay in most cases; `turns:...:443?transport=tcp` helps on restrictive firewalls.
+**iPhone / LTE:** Safari mobile uses `iceTransportPolicy: "relay"` (TURN only). Toolbar HUD shows `relay/udp` or `relay/tcp` when connected. Mobile UX: trackpad cursor, gestures, collapsible bottom bar, software keyboard bridge.
+
+**Architecture:** one `RTCPeerConnection` per viewer; `clientId` deduplicates reconnects; exponential backoff; stale peer GC every 30s.
 
 ## Phase summary
 

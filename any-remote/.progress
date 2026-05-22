@@ -1,27 +1,29 @@
-# Progress — 2026-05-21 (TURN)
+# Progress — 2026-05-21 (production mobile)
 
-## TURN relay (Metered)
-- `ice_config.py`: STUN + TURN (UDP 80, TCP 80/443, TLS 443) for host + `GET /ice-config`
-- Client fetches `/ice-config`; fallback embeds same servers
-- SDP filter keeps `relay` candidates; logs offer/answer ICE counts on host
-- Toolbar `#info-conn`: connection, ICE, relay/p2p path, DC, codec, FPS
-- Input gated until `connectionState=connected` + ICE connected + DC open
-- Host meta delayed until connection connected
-- ICE gather timeout 15–20s on mobile for TURN candidates
+## Phase 1 ICE/TURN
+- Safari mobile: `iceTransportPolicy: "relay"` via `/ice-config` + `ice_policy.py`
+- Relay-only SDP filter (offer + answer) when relay policy active
+- TURN UDP/TCP/443/TLS in `ice_config.py`
+- ICE diagnostics: selected_pair logs, platform meta, ICE duration
+- Reconnect: exponential backoff 2s–30s, connect debounce, clientId dedup
+- Stale peer GC (30s loop)
+- Adaptive quality: `adapt` messages → bitrate/FPS on host
 
-## Safari / iPhone pass
-- Host: delayed ICE-failed cleanup (12s Safari, 6s desktop) — avoids premature peer teardown → "DC closed"
-- Host: H.264 tune (baseline, annex-B, repeat-headers), keyframe prime burst, SDP H264-first reorder
-- Client: iOS DataChannel unordered, Baseline H264 codec prefs, dedicated MediaStream attach, play() retries
-- Client: DC close status only when video not playing; visibility replay
+## Phase 2 Mobile UX
+- Modular `client/js/*` (no monolithic client.js)
+- Trackpad + direct touch modes (localStorage)
+- Virtual cursor, gestures (scroll/pinch/3-finger keyboard)
+- Mobile toolbar (collapsible, safe-area)
+- Hidden input keyboard bridge
+- HUD panel: RTT, loss, relay path, fps
 
-## Image quality pass
-- Bitrates: mobile 900k, balanced 3M, high 5M, ultra 7M
-- Mobile capture uses LANCZOS resize
-- Desktop video CSS uses `image-rendering: auto` (mobile keeps optimize-contrast)
+## Phase 3 Backend
+- `peer_manager.py` — offer handling, cleanup, dedup
+- `peer_session.py` — extended state
+- Mobile preset: 960×540 @ 10fps, 850kbps
 
-## Verify on device
-1. Restart `python host.py -v`
-2. ngrok HTTPS → iPhone Safari, hard refresh
-3. Host log: `negotiated=H264`, `h264_tune=True`, keyframe prime
-4. Console: `negotiated codec H264`, video metadata non-zero
+## Test
+1. `python host.py -v`
+2. iPhone Safari → ngrok HTTPS, hard refresh
+3. Console: `ICE policy relay`, `selected_pair=relay/...`
+4. Trackpad mode + toolbar
