@@ -21,9 +21,13 @@ any-remote/
         ├── app.js               # Entry
         ├── connection-manager.js
         ├── ice-policy.js        # relay-only Safari mobile
+        ├── fast-connect.js      # 8s connect budget; first-frame gates recovery
+        ├── pointer-controller.js # True down/move/up + drag lock
+        ├── scroll-engine.js     # Smoothed two-finger scroll
+        ├── viewport-controller.js # Pinch zoom + pan
         ├── mobile-input.js      # Trackpad + direct touch
-        ├── gestures.js
-        ├── keyboard-bridge.js
+        ├── gestures.js          # Citrix-style gesture map
+        ├── keyboard-bridge.js   # Hidden textarea + clipboard paste
         ├── stats-hud.js
         └── ...
 ├── peer_manager.py    # Per-viewer lifecycle + dedup

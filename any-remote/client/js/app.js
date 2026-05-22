@@ -1,5 +1,5 @@
 /**
- * Any-Remote — modular entry (Safari-stable rendering pipeline).
+ * Any-Remote — modular entry (fast connect + Citrix-grade mobile UX).
  */
 
 import { detectPlatform } from "./platform.js";
@@ -32,10 +32,24 @@ let mobileInput = null;
 let gestures = null;
 let keyboard = null;
 let controlsBound = false;
+let toolbarHideTimer = null;
 
 function setStatus(text, live) {
     document.getElementById("status-text").textContent = text;
     document.getElementById("status-dot").classList.toggle("live", !!live);
+}
+
+function scheduleToolbarHide() {
+    if (!platform.mobile) return;
+    const bar = document.getElementById("mobile-toolbar");
+    if (!bar) return;
+    clearTimeout(toolbarHideTimer);
+    bar.classList.remove("collapsed");
+    toolbarHideTimer = setTimeout(() => {
+        if (document.body.classList.contains("session-live")) {
+            bar.classList.add("collapsed");
+        }
+    }, 4000);
 }
 
 function initPlatformUi() {
@@ -45,6 +59,7 @@ function initPlatformUi() {
     const sel = document.getElementById("quality-select");
     if (sel) sel.value = "mobile";
     quality.mode = "mobile";
+    quality.userMode = "mobile";
     document.getElementById("desktop-toolbar")?.classList.add("hide-mobile");
     document.getElementById("mobile-toolbar")?.classList.remove("hidden");
     if (needsGestureConnect) {
@@ -60,6 +75,7 @@ function beginSession() {
     setStatus("Connecting…", false);
     forcePlayVideo();
     conn.start();
+    scheduleToolbarHide();
 }
 
 function bindDesktopPointer() {
@@ -113,12 +129,13 @@ function bindControls() {
 
     document.getElementById("quality-select")?.addEventListener("change", (e) => {
         quality.mode = e.target.value;
-        conn.send({ t: "quality", mode: e.target.value });
+        quality.userMode = e.target.value;
+        conn.send({ t: "quality", mode: quality.effectiveQuality(e.target.value) });
     });
     document.getElementById("m-quality")?.addEventListener("change", (e) => {
-        quality.mode = e.target.value;
+        quality.userMode = e.target.value;
         document.getElementById("quality-select").value = e.target.value;
-        conn.send({ t: "quality", mode: e.target.value });
+        conn.send({ t: "quality", mode: quality.effectiveQuality(e.target.value) });
     });
 
     document.getElementById("zoom-slider")?.addEventListener("input", (e) => {
@@ -144,10 +161,37 @@ function bindControls() {
         renderer.displayMode = "fit";
         renderer.apply();
     });
+    document.getElementById("m-zoom")?.addEventListener("click", () => {
+        const next = renderer.zoomLevel >= 150 ? 100 : renderer.zoomLevel + 25;
+        renderer.zoomLevel = next;
+        renderer.displayMode = "actual";
+        renderer.apply();
+    });
 
-    document.getElementById("btn-touch-mode")?.addEventListener("click", () => mobileInput?.toggleMode());
-    document.getElementById("btn-touch-direct")?.addEventListener("click", () => mobileInput?.setMode("direct"));
-    document.getElementById("m-keyboard")?.addEventListener("click", () => keyboard?.toggle());
+    document.getElementById("btn-touch-mode")?.addEventListener("click", () => {
+        mobileInput?.toggleMode();
+        scheduleToolbarHide();
+    });
+    document.getElementById("btn-touch-direct")?.addEventListener("click", () => {
+        mobileInput?.setMode("direct");
+        scheduleToolbarHide();
+    });
+    document.getElementById("m-keyboard")?.addEventListener("click", () => {
+        keyboard?.toggle();
+        scheduleToolbarHide();
+    });
+    document.getElementById("m-clipboard")?.addEventListener("click", async () => {
+        await keyboard?.pasteFromSystem();
+        scheduleToolbarHide();
+    });
+    document.getElementById("m-right-click")?.addEventListener("click", () => {
+        if (!mobileInput || !conn.canSendInput()) return;
+        const { width, height } = renderer.layoutDimensions();
+        const cx = mobileInput.cursor.x * width;
+        const cy = mobileInput.cursor.y * height;
+        mobileInput.rightClick(cx, cy);
+        scheduleToolbarHide();
+    });
     document.getElementById("m-toggle-bar")?.addEventListener("click", () => {
         document.getElementById("mobile-toolbar")?.classList.toggle("collapsed");
     });
@@ -156,6 +200,13 @@ function bindControls() {
         if (mobileInput) mobileInput.sensitivity = parseFloat(e.target.value);
         localStorage.setItem("any-remote-sensitivity", e.target.value);
     });
+
+    const viewport = document.getElementById("viewport");
+    viewport?.addEventListener(
+        "touchstart",
+        () => scheduleToolbarHide(),
+        { passive: true },
+    );
 
     window.addEventListener("resize", () => renderer.apply());
     window.addEventListener("orientationchange", () => setTimeout(() => renderer.apply(), 300));
@@ -171,6 +222,7 @@ function stopSession() {
         document.getElementById("start").style.display = "inline-block";
     }
     setStatus("Offline", false);
+    document.getElementById("mobile-toolbar")?.classList.remove("collapsed");
 }
 
 function wireQualityFromMonitor() {
@@ -195,12 +247,22 @@ conn.onMeta = (msg) => {
 
 conn.onInputReady = () => setStatus("Live", true);
 
+conn.onFirstFrame = () => {
+    quality.onFirstFrame();
+    scheduleToolbarHide();
+};
+
 keyboard = new KeyboardBridge((e) => conn.send(e));
 
 if (platform.mobile) {
     mobileInput = new MobileInputController(renderer, (e) => conn.send(e), platform);
     mobileInput.setMode(mobileInput.mode);
-    gestures = new GestureController(mobileInput, keyboard, () => conn.canSendInput());
+    gestures = new GestureController(
+        mobileInput,
+        keyboard,
+        () => conn.canSendInput(),
+        (e) => conn.send(e),
+    );
 } else {
     bindDesktopPointer();
 }
@@ -217,4 +279,4 @@ if (needsGestureConnect) {
     document.getElementById("connect-splash")?.classList.add("hidden");
 }
 
-console.log("[any-remote] ready singleton video", platform.isSafariMobile ? "gesture-connect" : "direct-connect");
+console.log("[any-remote] ready", platform.isSafariMobile ? "gesture-connect" : "direct-connect");

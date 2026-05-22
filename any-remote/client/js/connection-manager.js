@@ -1,5 +1,5 @@
 /**
- * WebRTC connection manager — peer-only reconnect (never reload page / never recreate video).
+ * WebRTC — fast connect, peer-only reconnect, ICE discipline.
  */
 
 import {
@@ -14,7 +14,8 @@ import { preferReceiverH264, attachVideoTrack } from "./safari-compat.js";
 import { getClientId, clientMeta } from "./platform.js";
 import { VideoRecoveryMonitor } from "./video-recovery.js";
 import { mungeSdpForSafariMobile } from "./sdp-munge.js";
-import { stopAutoplayRetryLoop } from "./video-singleton.js";
+import { stopAutoplayRetryLoop, forcePlayVideo } from "./video-singleton.js";
+import { FastConnect, CONNECT_BUDGET_MS, ICE_DISCONNECT_MS } from "./fast-connect.js";
 
 const MAX_RECONNECT = 5;
 const RECONNECT_BASE_MS = 2000;
@@ -35,6 +36,7 @@ export class ConnectionManager {
         this.reconnectAttempts = 0;
         this.reconnectTimer = null;
         this.disconnectTimer = null;
+        this.iceFailTimer = null;
         this.statsTimer = null;
         this.connecting = false;
         this.lastConnectAt = 0;
@@ -42,12 +44,20 @@ export class ConnectionManager {
         this.onInputReady = null;
         this.onMeta = null;
         this.onState = null;
+        this.onFirstFrame = null;
         this.iceConfig = null;
         this.relayOnly = false;
+
+        this.fastConnect = new FastConnect({
+            onFirstFrame: () => this._handleFirstFrame(),
+        });
+
         this.videoMonitor = new VideoRecoveryMonitor(platform, {
             isSessionLive: () => this.sessionActive,
             isPeerConnected: () =>
                 this.pc?.connectionState === "connected" && this.isIceConnected(),
+            inStartup: () => this.fastConnect.inStartup,
+            onFirstFrame: () => this.fastConnect.notifyFirstFrame(),
             requestKeyframe: () => {
                 if (this.dc?.readyState === "open") {
                     this.dc.send(JSON.stringify({ t: "keyframe" }));
@@ -60,12 +70,25 @@ export class ConnectionManager {
         });
     }
 
-    /** Reconnect RTCPeerConnection only — video element untouched. */
+    _handleFirstFrame() {
+        document.getElementById("connect-splash")?.classList.add("hidden");
+        stopAutoplayRetryLoop();
+        forcePlayVideo();
+        this.reconnectAttempts = 0;
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+        this.onFirstFrame?.();
+        if (this.fastConnect.markStablePlayback()) {
+            this.quality.onStableRamp();
+        }
+    }
+
     _peerOnlyReconnect() {
         if (!this.sessionActive) return;
-        console.warn("[any-remote] peer-only reconnect (no page reload)");
+        console.warn("[any-remote] peer-only reconnect");
         this.videoMonitor.stop();
         this.renderer.detachVideo();
+        this.fastConnect.markConnectStart();
         this.reconnectAttempts = Math.max(0, this.reconnectAttempts - 1);
         this.connect();
     }
@@ -100,7 +123,9 @@ export class ConnectionManager {
             this._flushDcQueue();
             this.send({
                 t: "quality",
-                mode: this.quality.effectiveQuality(this.quality.mode),
+                mode: this.quality.effectiveQuality(
+                    document.getElementById("quality-select")?.value || "balanced",
+                ),
             });
             this.onInputReady?.();
         } else if (!ready) {
@@ -137,6 +162,7 @@ export class ConnectionManager {
             this._setState("failed");
             return;
         }
+        if (this.pc?.connectionState === "connected") return;
         this.reconnectAttempts++;
         const delay = this._backoffMs();
         console.log("[any-remote] peer reconnect", this.reconnectAttempts, "in", delay);
@@ -144,16 +170,36 @@ export class ConnectionManager {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = setTimeout(() => {
             this.reconnectTimer = null;
-            if (this.sessionActive) this.connect();
+            if (this.sessionActive && this.pc?.connectionState !== "connected") {
+                this.connect();
+            }
         }, delay);
+    }
+
+    _scheduleDelayedReconnect(delayMs, reason) {
+        clearTimeout(this.iceFailTimer);
+        clearTimeout(this.disconnectTimer);
+        this.iceFailTimer = setTimeout(() => {
+            this.iceFailTimer = null;
+            if (
+                !this.sessionActive ||
+                this.pc?.connectionState === "connected"
+            ) {
+                return;
+            }
+            console.log("[any-remote] reconnect after", reason);
+            this._scheduleReconnect();
+        }, delayMs);
     }
 
     _cleanupPeerOnly() {
         clearTimeout(this.reconnectTimer);
         clearTimeout(this.disconnectTimer);
+        clearTimeout(this.iceFailTimer);
         clearInterval(this.statsTimer);
         this.reconnectTimer = null;
         this.disconnectTimer = null;
+        this.iceFailTimer = null;
         this.statsTimer = null;
         this.inputReady = false;
         if (this.dc) {
@@ -188,7 +234,11 @@ export class ConnectionManager {
             console.log("[any-remote] iceConnectionState", pc.iceConnectionState);
             this.refreshInputReady();
             if (pc.iceConnectionState === "failed" && this.sessionActive) {
-                this._scheduleReconnect();
+                if (pc.connectionState === "connected") {
+                    console.log("[any-remote] ICE failed but DTLS up — no ICE restart");
+                    return;
+                }
+                this._scheduleDelayedReconnect(ICE_DISCONNECT_MS, "ice-failed");
             }
         });
 
@@ -203,23 +253,16 @@ export class ConnectionManager {
             clearTimeout(this.disconnectTimer);
             if (pc.connectionState === "connected") {
                 this.reconnectAttempts = 0;
+                clearTimeout(this.iceFailTimer);
                 this._setState("connected");
                 this.hud.markConnected();
                 document.body.classList.add("session-live");
                 this.refreshInputReady();
             } else if (pc.connectionState === "failed") {
                 document.body.classList.remove("session-live");
-                this._scheduleReconnect();
+                this._scheduleDelayedReconnect(ICE_DISCONNECT_MS, "conn-failed");
             } else if (pc.connectionState === "disconnected") {
-                const delay = this.platform.isSafariMobile ? 8000 : 3000;
-                this.disconnectTimer = setTimeout(() => {
-                    if (
-                        this.pc?.connectionState === "disconnected" &&
-                        this.sessionActive
-                    ) {
-                        this._scheduleReconnect();
-                    }
-                }, delay);
+                this._scheduleDelayedReconnect(ICE_DISCONNECT_MS, "disconnected");
             }
         });
 
@@ -232,7 +275,6 @@ export class ConnectionManager {
                 this.videoMonitor,
             );
             this.videoMonitor.onNewSession();
-            this.videoMonitor.start();
         });
     }
 
@@ -241,12 +283,10 @@ export class ConnectionManager {
         this.hud.update({ dcState: channel.readyState });
         channel.addEventListener("open", () => {
             this.hud.update({ dcState: "open" });
-            console.log("[any-remote] DataChannel open");
             this.refreshInputReady();
         });
         channel.addEventListener("close", () => {
             this.hud.update({ dcState: "closed" });
-            console.log("[any-remote] DataChannel close");
         });
         channel.addEventListener("message", (ev) => {
             try {
@@ -265,80 +305,91 @@ export class ConnectionManager {
         return out;
     }
 
+    async _doConnect() {
+        this.iceConfig = await fetchIceConfig(this.platform);
+        this.relayOnly = this.iceConfig.iceTransportPolicy === "relay";
+
+        const pc = new RTCPeerConnection(
+            buildRtcConfiguration(this.iceConfig, this.platform),
+        );
+        this.pc = pc;
+        this._wirePc(pc);
+        pc.addTransceiver("video", { direction: "recvonly" });
+        preferReceiverH264(pc, this.platform);
+
+        const dcOpts = this.platform.ios
+            ? { ordered: false, maxRetransmits: 0 }
+            : { ordered: true };
+        this._setupDc(pc.createDataChannel("input", dcOpts));
+
+        await pc.setLocalDescription(await pc.createOffer());
+        await waitForIceGathering(pc, this.platform, true);
+
+        const sdp = this._mungeSdp(pc.localDescription.sdp);
+        console.log("[any-remote] offer ICE", countSdpCandidates(sdp));
+
+        const body = {
+            sdp,
+            type: pc.localDescription.type,
+            quality: this.quality.effectiveQuality(
+                document.getElementById("quality-select")?.value || "mobile",
+            ),
+            mobile: this.platform.mobile,
+            safari: this.platform.safari,
+            ios: this.platform.ios,
+            forceRelay: this.relayOnly,
+            clientId: getClientId(),
+            clientMeta: {
+                ...clientMeta(this.platform),
+                iceTransportPolicy: this.iceConfig.iceTransportPolicy,
+            },
+        };
+
+        const r = await fetch("/offer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        if (!r.ok) throw new Error("signaling " + r.status);
+        const answer = await r.json();
+        answer.sdp = this._mungeSdp(answer.sdp);
+        await pc.setRemoteDescription(answer);
+        this.hud.update({ codec: answer.codec || "—" });
+
+        this.statsTimer = setInterval(() => {
+            this.hud.poll(this.pc);
+            this.refreshInputReady();
+            if (this.fastConnect.firstFrameReceived && this.fastConnect.markStablePlayback()) {
+                this.quality.onStableRamp();
+            }
+        }, 1500);
+    }
+
     async connect() {
         const now = Date.now();
         if (this.connecting || now - this.lastConnectAt < CONNECT_DEBOUNCE_MS) return;
         this.connecting = true;
         this.lastConnectAt = now;
+        this.fastConnect.markConnectStart();
         this.videoMonitor.stop();
         this._cleanupPeerOnly();
         this._setState("connecting");
         this.hud.markIceStart();
 
+        const budget = new Promise((_, reject) =>
+            setTimeout(
+                () => reject(new Error("connect budget exceeded")),
+                CONNECT_BUDGET_MS,
+            ),
+        );
+
         try {
-            this.iceConfig = await fetchIceConfig(this.platform);
-            this.relayOnly = this.iceConfig.iceTransportPolicy === "relay";
-            console.log(
-                "[any-remote] ICE policy",
-                this.iceConfig.iceTransportPolicy,
-                clientMeta(this.platform),
-            );
-
-            const pc = new RTCPeerConnection(
-                buildRtcConfiguration(this.iceConfig, this.platform),
-            );
-            this.pc = pc;
-            this._wirePc(pc);
-            pc.addTransceiver("video", { direction: "recvonly" });
-            preferReceiverH264(pc, this.platform);
-
-            const dcOpts = this.platform.ios
-                ? { ordered: false, maxRetransmits: 0 }
-                : { ordered: true };
-            this._setupDc(pc.createDataChannel("input", dcOpts));
-
-            await pc.setLocalDescription(await pc.createOffer());
-            await waitForIceGathering(pc, this.platform);
-
-            let sdp = this._mungeSdp(pc.localDescription.sdp);
-            console.log("[any-remote] offer ICE", countSdpCandidates(sdp));
-
-            const body = {
-                sdp,
-                type: pc.localDescription.type,
-                quality: this.quality.effectiveQuality(
-                    document.getElementById("quality-select")?.value || "balanced",
-                ),
-                mobile: this.platform.mobile,
-                safari: this.platform.safari,
-                ios: this.platform.ios,
-                forceRelay: this.relayOnly,
-                clientId: getClientId(),
-                clientMeta: {
-                    ...clientMeta(this.platform),
-                    iceTransportPolicy: this.iceConfig.iceTransportPolicy,
-                },
-            };
-
-            const r = await fetch("/offer", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(body),
-            });
-            if (!r.ok) throw new Error("signaling " + r.status);
-            const answer = await r.json();
-            answer.sdp = this._mungeSdp(answer.sdp);
-            console.log("[any-remote] answer ICE", countSdpCandidates(answer.sdp));
-            this.hud.update({ codec: answer.codec || "—" });
-            await pc.setRemoteDescription(answer);
-
-            this.statsTimer = setInterval(() => {
-                this.hud.poll(this.pc);
-                this.refreshInputReady();
-            }, 1500);
+            await Promise.race([this._doConnect(), budget]);
         } catch (err) {
             console.error("[any-remote] connect error", err);
-            this._scheduleReconnect();
+            if (!this.fastConnect.firstFrameReceived) {
+                this._scheduleReconnect();
+            }
         } finally {
             this.connecting = false;
         }
@@ -347,6 +398,7 @@ export class ConnectionManager {
     start() {
         this.sessionActive = true;
         this.reconnectAttempts = 0;
+        this.quality.onFirstFrame();
         return this.connect();
     }
 
@@ -357,5 +409,7 @@ export class ConnectionManager {
         stopAutoplayRetryLoop();
         this._cleanupPeerOnly();
         this.videoMonitor.clearMedia();
+        this.quality.stablePlayback = false;
+        this.quality.rampStage = 0;
     }
 }

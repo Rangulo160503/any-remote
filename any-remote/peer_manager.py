@@ -118,8 +118,8 @@ async def handle_offer(params: dict) -> dict:
     client_id = params.get("clientId") or ""
     client_meta = params.get("clientMeta") or {}
 
-    if mobile and quality == "balanced":
-        quality = "mobile"
+    if mobile and quality in ("balanced", "mobile"):
+        quality = "startup_mobile"
 
     preset = get_preset(quality)
     if _maybe_upgrade_capture:

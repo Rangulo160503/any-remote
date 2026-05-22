@@ -18,6 +18,14 @@ class QualityPreset:
 
 
 PRESETS: dict[str, QualityPreset] = {
+    "startup_mobile": QualityPreset(
+        name="startup_mobile",
+        max_width=640,
+        max_height=360,
+        fps=8,
+        bitrate=550_000,
+        resample=Image.Resampling.BILINEAR,
+    ),
     "mobile": QualityPreset(
         name="mobile",
         max_width=960,
@@ -62,7 +70,7 @@ PRESETS: dict[str, QualityPreset] = {
 
 DEFAULT_QUALITY = "balanced"
 
-ORDER = ("mobile", "low", "balanced", "high", "ultra")
+ORDER = ("startup_mobile", "mobile", "low", "balanced", "high", "ultra")
 
 
 def get_preset(name: str) -> QualityPreset:

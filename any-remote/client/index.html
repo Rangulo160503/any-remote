@@ -62,27 +62,30 @@
             </div>
         </main>
 
-        <nav id="mobile-toolbar" class="mobile-toolbar hidden collapsed">
+        <nav id="mobile-toolbar" class="mobile-toolbar hidden collapsed" aria-label="Remote controls">
             <button type="button" id="m-toggle-bar" class="m-fab" title="Toolbar">☰</button>
             <div class="m-bar-inner">
-                <button type="button" id="m-reconnect">↻</button>
-                <button type="button" id="m-stop" class="danger">✕</button>
-                <button type="button" id="m-keyboard">⌨</button>
-                <button type="button" id="btn-touch-mode" class="active">Trackpad</button>
-                <button type="button" id="btn-touch-direct">Direct</button>
-                <button type="button" id="m-fit">Fit</button>
-                <select id="m-quality">
+                <button type="button" id="m-reconnect" title="Reconnect">↻</button>
+                <button type="button" id="m-stop" class="danger" title="Disconnect">✕</button>
+                <button type="button" id="m-keyboard" title="Keyboard">⌨</button>
+                <button type="button" id="m-clipboard" title="Paste to remote">📋</button>
+                <button type="button" id="m-right-click" title="Right click">☰</button>
+                <button type="button" id="btn-touch-mode" class="active" title="Trackpad mode">Trackpad</button>
+                <button type="button" id="btn-touch-direct" title="Direct touch">Direct</button>
+                <button type="button" id="m-fit" title="Fit screen">Fit</button>
+                <button type="button" id="m-zoom" title="Zoom step">＋</button>
+                <select id="m-quality" title="Quality">
                     <option value="mobile">Mobile</option>
                     <option value="balanced">Balanced</option>
                     <option value="high">High</option>
                 </select>
                 <label class="m-sens">Sens
-                    <input type="range" id="sensitivity-slider" min="0.6" max="2.5" step="0.1" value="1.2"/>
+                    <input type="range" id="sensitivity-slider" min="0.6" max="2.5" step="0.1" value="1.35"/>
                 </label>
             </div>
         </nav>
 
-        <input type="text" id="hidden-input" class="hidden-input hidden" autocomplete="off" autocorrect="off" autocapitalize="off" enterkeyhint="done"/>
+        <textarea id="hidden-text" class="hidden-text hidden" rows="1" autocomplete="off" autocorrect="on" autocapitalize="off" enterkeyhint="done" aria-hidden="true"></textarea>
     </div>
     <script type="module" src="/js/app.js"></script>
 </body>

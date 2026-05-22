@@ -1,29 +1,23 @@
-/** Virtual cursor + direct / trackpad touch modes. */
+/** Trackpad + direct touch with pointer state machine and smoothing. */
+
+import { PointerController } from "./pointer-controller.js";
 
 const MODE_KEY = "any-remote-touch-mode";
 
 export class MobileInputController {
     constructor(renderer, sendInput, platform) {
         this.renderer = renderer;
-        this.sendInput = sendInput;
         this.platform = platform;
         this.mode = localStorage.getItem(MODE_KEY) || "trackpad";
-        this.sensitivity = parseFloat(localStorage.getItem("any-remote-sensitivity") || "1.2");
+        this.sensitivity = parseFloat(localStorage.getItem("any-remote-sensitivity") || "1.35");
         this.cursor = { x: 0.5, y: 0.5 };
-        this.drag = { active: false, button: null };
-        this.lastMove = 0;
-        this.el = null;
-        this.overlay = document.getElementById("touch-overlay");
-        this._initCursor();
-    }
-
-    _initCursor() {
+        this.smooth = { x: 0, y: 0 };
+        this.pointer = new PointerController(sendInput, (cx, cy) =>
+            this.mode === "direct"
+                ? this.renderer.coordsFromClient(cx, cy)
+                : { x: this.cursor.x, y: this.cursor.y },
+        );
         this.el = document.getElementById("virtual-cursor");
-        if (!this.el && this.overlay) {
-            this.el = document.createElement("div");
-            this.el.id = "virtual-cursor";
-            this.overlay.appendChild(this.el);
-        }
         this._paintCursor();
     }
 
@@ -34,6 +28,7 @@ export class MobileInputController {
         document.body.classList.toggle("touch-trackpad", mode === "trackpad");
         document.getElementById("btn-touch-mode")?.classList.toggle("active", mode === "trackpad");
         document.getElementById("btn-touch-direct")?.classList.toggle("active", mode === "direct");
+        this._paintCursor();
     }
 
     toggleMode() {
@@ -51,76 +46,56 @@ export class MobileInputController {
         this.el.style.top = `${this.cursor.y * height}px`;
     }
 
-    _normFromDirect(clientX, clientY) {
-        return this.renderer.coordsFromClient(clientX, clientY);
-    }
-
-    _moveCursor(dx, dy) {
-        const sens = this.sensitivity * 0.0035;
-        this.cursor.x = Math.max(0, Math.min(1, this.cursor.x + dx * sens));
-        this.cursor.y = Math.max(0, Math.min(1, this.cursor.y + dy * sens));
+    _accel(dx, dy) {
+        const s = this.sensitivity * 0.0042;
+        this.smooth.x = this.smooth.x * 0.35 + dx * s;
+        this.smooth.y = this.smooth.y * 0.35 + dy * s;
+        const mag = Math.hypot(this.smooth.x, this.smooth.y);
+        const curve = mag < 0.002 ? 0 : Math.min(1.8, 0.6 + mag * 12);
+        this.cursor.x = Math.max(0, Math.min(1, this.cursor.x + this.smooth.x * curve));
+        this.cursor.y = Math.max(0, Math.min(1, this.cursor.y + this.smooth.y * curve));
         this._paintCursor();
-        const now = Date.now();
-        const interval = this.drag.active ? 16 : 33;
-        if (now - this.lastMove < interval) return;
-        this.lastMove = now;
-        this.sendInput({ t: "move", x: this.cursor.x, y: this.cursor.y });
     }
 
-    pointerDown(clientX, clientY, button = "left") {
-        let coords;
+    pointerDown(cx, cy, button = "left") {
+        this.pointer.pointerDown(cx, cy, button);
+    }
+
+    pointerUp(cx, cy, button) {
+        this.pointer.pointerUp(cx, cy, button);
+    }
+
+    pointerMove(cx, cy, dx, dy) {
         if (this.mode === "direct") {
-            coords = this._normFromDirect(clientX, clientY);
-            if (!coords) return;
-        } else {
-            coords = { x: this.cursor.x, y: this.cursor.y };
-        }
-        this.drag = { active: true, button };
-        this.sendInput({ t: "down", button, x: coords.x, y: coords.y });
-    }
-
-    pointerUp(clientX, clientY) {
-        if (!this.drag.active) return;
-        let coords;
-        if (this.mode === "direct" && clientX != null) {
-            coords = this._normFromDirect(clientX, clientY) || { x: this.cursor.x, y: this.cursor.y };
-        } else {
-            coords = { x: this.cursor.x, y: this.cursor.y };
-        }
-        this.sendInput({ t: "up", button: this.drag.button || "left", x: coords.x, y: coords.y });
-        this.drag = { active: false, button: null };
-        document.body.classList.remove("remote-drag");
-    }
-
-    pointerMove(clientX, clientY, dx, dy) {
-        if (this.mode === "direct") {
-            const c = this._normFromDirect(clientX, clientY);
-            if (c) {
-                const now = Date.now();
-                if (now - this.lastMove >= (this.drag.active ? 16 : 33)) {
-                    this.lastMove = now;
-                    this.sendInput({ t: "move", x: c.x, y: c.y });
-                }
-            }
+            this.pointer.pointerMove(cx, cy);
             return;
         }
-        this._moveCursor(dx, dy);
+        this._accel(dx, dy);
+        this.pointer.pointerMove(null, null, true);
     }
 
-    scroll(dx, dy) {
-        const step = 0.04;
-        this.cursor.y = Math.max(0, Math.min(1, this.cursor.y + dy * step));
-        this._paintCursor();
-        this.sendInput({ t: "move", x: this.cursor.x, y: this.cursor.y });
+    click(cx, cy, button = "left") {
+        this.pointer.click(cx, cy, button);
+    }
+
+    rightClick(cx, cy) {
+        this.pointer.rightClick(cx, cy);
     }
 
     doubleClick() {
         const { x, y } = this.cursor;
-        this.sendInput({ t: "down", button: "left", x, y });
-        this.sendInput({ t: "up", button: "left", x, y });
-        setTimeout(() => {
-            this.sendInput({ t: "down", button: "left", x, y });
-            this.sendInput({ t: "up", button: "left", x, y });
-        }, 80);
+        this.pointer.doubleClickAt(x, y);
+    }
+
+    enableDragLock() {
+        this.pointer.enableDragLock();
+    }
+
+    disableDragLock() {
+        this.pointer.disableDragLock();
+    }
+
+    get dragLock() {
+        return this.pointer.dragLock;
     }
 }

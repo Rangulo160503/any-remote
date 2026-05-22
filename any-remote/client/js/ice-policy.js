@@ -108,8 +108,14 @@ export function countSdpCandidates(sdp) {
     return c;
 }
 
-export function waitForIceGathering(pc, platform) {
-    const ms = platform.isSafariMobile ? 22000 : platform.mobile ? 18000 : 12000;
+export function waitForIceGathering(pc, platform, startupPhase = false) {
+    const ms = startupPhase
+        ? 5000
+        : platform.isSafariMobile
+          ? 15000
+          : platform.mobile
+            ? 12000
+            : 10000;
     return new Promise((resolve) => {
         if (pc.iceGatheringState === "complete") return resolve();
         const done = () => {

@@ -52,8 +52,31 @@ def handle_message(raw: str) -> None:
         key = _normalize_key(event.get("key", ""))
         if key:
             pyautogui.keyUp(key)
+    elif kind == "wheel":
+        _handle_wheel(event)
+    elif kind == "clipboard":
+        _handle_clipboard(event)
     else:
         logger.debug("ignored event: %s", kind)
+
+
+def _handle_wheel(event: dict) -> None:
+    x, y = _to_screen(event.get("x", 0.5), event.get("y", 0.5))
+    pyautogui.moveTo(x, y, _pause=False)
+    dy = float(event.get("dy", 0))
+    dx = float(event.get("dx", 0))
+    if abs(dy) >= 0.5:
+        pyautogui.scroll(int(round(dy)))
+    if abs(dx) >= 0.5 and hasattr(pyautogui, "hscroll"):
+        pyautogui.hscroll(int(round(dx)))
+
+
+def _handle_clipboard(event: dict) -> None:
+    text = event.get("text", "")
+    if not text:
+        return
+    logger.info("clipboard paste %d chars", len(text))
+    pyautogui.write(text, interval=0.02)
 
 
 def _handle_down(event: dict) -> None:

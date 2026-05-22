@@ -1,15 +1,24 @@
-/** Multi-touch gestures for mobile remote control. */
+/**
+ * Citrix-style gesture map — tap, drag lock, scroll, pinch, right-click.
+ */
+
+import { ScrollEngine } from "./scroll-engine.js";
+import { ViewportController } from "./viewport-controller.js";
 
 export class GestureController {
-    constructor(mobileInput, keyboard, canInput) {
+    constructor(mobileInput, keyboard, canInput, sendInput) {
         this.input = mobileInput;
         this.keyboard = keyboard;
         this.canInput = canInput;
+        this.scroll = new ScrollEngine(sendInput, mobileInput.pointer);
+        this.viewport = new ViewportController(mobileInput.renderer);
         this.lastTap = 0;
+        this.tapCount = 0;
         this.longPressTimer = null;
-        this.pinchStart = null;
+        this.dragLockPending = false;
+        this.twoFingerMoved = false;
+        this.mode = "none";
         this.lastTouch = { x: 0, y: 0 };
-        this.scrollMode = false;
         this._bind();
     }
 
@@ -17,107 +26,147 @@ export class GestureController {
         const layer = document.getElementById("touch-overlay");
         if (!layer) return;
         const opts = { passive: false };
-
-        layer.addEventListener(
-            "touchstart",
-            (e) => this._onStart(e),
-            opts,
-        );
+        layer.addEventListener("touchstart", (e) => this._onStart(e), opts);
         layer.addEventListener("touchmove", (e) => this._onMove(e), opts);
         layer.addEventListener("touchend", (e) => this._onEnd(e), opts);
         layer.addEventListener("touchcancel", (e) => this._onEnd(e), opts);
-    }
-
-    _touches(e) {
-        return Array.from(e.changedTouches);
     }
 
     _onStart(e) {
         e.preventDefault();
         if (!this.canInput()) return;
         const n = e.touches.length;
+
         if (n === 3) {
             this.keyboard.toggle();
             return;
         }
+
         if (n === 2) {
-            this.scrollMode = true;
-            const [a, b] = [e.touches[0], e.touches[1]];
-            this.pinchStart = {
-                dist: Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY),
-                zoom: this.input.renderer.zoomLevel,
+            this.mode = "two-finger";
+            this.twoFingerMoved = false;
+            const a = e.touches[0];
+            const b = e.touches[1];
+            this.lastTouch = {
+                x: (a.clientX + b.clientX) / 2,
+                y: (a.clientY + b.clientY) / 2,
             };
+            this.viewport.onPinchStart([a, b]);
             return;
         }
+
         const t = e.touches[0];
         if (!t) return;
+        this.mode = "one-finger";
         this.lastTouch = { x: t.clientX, y: t.clientY };
+        const now = Date.now();
+
+        if (this.input.dragLock) {
+            this.input.disableDragLock();
+            return;
+        }
+
+        if (now - this.lastTap < 320) {
+            this.tapCount++;
+            if (this.tapCount >= 2) {
+                this.dragLockPending = true;
+                this.longPressTimer = setTimeout(() => {
+                    if (this.canInput() && this.dragLockPending) {
+                        this.input.enableDragLock();
+                        this.dragLockPending = false;
+                    }
+                }, 280);
+                return;
+            }
+        } else {
+            this.tapCount = 1;
+        }
+        this.lastTap = now;
+
         this.longPressTimer = setTimeout(() => {
-            if (this.canInput()) this.input.pointerDown(t.clientX, t.clientY, "left");
-        }, 450);
+            if (!this.canInput() || this.dragLockPending) return;
+            this.input.pointerDown(t.clientX, t.clientY, "left");
+        }, 500);
     }
 
     _onMove(e) {
         e.preventDefault();
         if (!this.canInput()) return;
-        if (e.touches.length === 2 && this.scrollMode) {
+
+        if (e.touches.length === 2 && this.mode === "two-finger") {
             const [a, b] = [e.touches[0], e.touches[1]];
-            const midY = (a.clientY + b.clientY) / 2;
-            const midX = (a.clientX + b.clientX) / 2;
-            this.input.scroll(midX - this.lastTouch.x, midY - this.lastTouch.y);
-            this.lastTouch = { x: midX, y: midY };
-            if (this.pinchStart) {
-                const dist = Math.hypot(b.clientX - a.clientX, b.clientY - a.clientY);
-                const delta = (dist - this.pinchStart.dist) * 0.08;
-                const r = this.input.renderer;
-                r.zoomLevel = Math.max(50, Math.min(200, this.pinchStart.zoom + delta));
-                if (r.displayMode === "fit") r.displayMode = "actual";
-                r.apply();
+            const dx = (a.clientX + b.clientX) / 2 - this.lastTouch.x;
+            const dy = (a.clientY + b.clientY) / 2 - this.lastTouch.y;
+            if (Math.hypot(dx, dy) > 8) {
+                this.twoFingerMoved = true;
+                this.scroll.feed(dx, dy);
             }
+            this.viewport.onPinchMove([a, b]);
+            this.lastTouch = {
+                x: (a.clientX + b.clientX) / 2,
+                y: (a.clientY + b.clientY) / 2,
+            };
             return;
         }
+
         const t = e.touches[0];
         if (!t) return;
         const dx = t.clientX - this.lastTouch.x;
         const dy = t.clientY - this.lastTouch.y;
-        if (Math.hypot(dx, dy) > 8) clearTimeout(this.longPressTimer);
-        this.input.pointerMove(t.clientX, t.clientY, dx, dy);
+        if (Math.hypot(dx, dy) > 5) {
+            clearTimeout(this.longPressTimer);
+            this.dragLockPending = false;
+        }
+
+        if (this.input.pointer.anyDown || this.input.dragLock) {
+            this.input.pointerMove(t.clientX, t.clientY, dx, dy);
+        } else if (this.input.mode === "trackpad") {
+            this.input.pointerMove(t.clientX, t.clientY, dx, dy);
+        }
         this.lastTouch = { x: t.clientX, y: t.clientY };
     }
 
     _onEnd(e) {
         e.preventDefault();
         clearTimeout(this.longPressTimer);
-        if (e.touches.length > 0) return;
         if (!this.canInput()) return;
 
-        if (this.scrollMode) {
-            this.scrollMode = false;
-            this.pinchStart = null;
-            this.input.pointerUp(null, null);
+        if (this.mode === "two-finger" && e.touches.length === 0) {
+            if (!this.twoFingerMoved) {
+                const t = e.changedTouches[0];
+                this.input.rightClick(t?.clientX, t?.clientY);
+            }
+            this.viewport.onPinchEnd();
+            this.mode = "none";
+            if (this.input.pointer.anyDown) {
+                this.input.pointer.releaseAll();
+            }
             return;
         }
 
-        const t = this._touches(e)[0];
+        const t = e.changedTouches[0];
         const now = Date.now();
-        if (t && now - this.lastTap < 300) {
+
+        if (this.dragLockPending && !this.input.dragLock) {
             this.input.doubleClick();
-            this.lastTap = 0;
-            return;
-        }
-        this.lastTap = now;
-
-        if (e.touches.length === 0 && e.changedTouches.length === 2) {
-            this.input.pointerDown(t?.clientX, t?.clientY, "right");
-            this.input.pointerUp(t?.clientX, t?.clientY);
+            this.dragLockPending = false;
+            this.tapCount = 0;
+            this.mode = "none";
             return;
         }
 
-        if (this.input.drag.active) {
-            this.input.pointerUp(t?.clientX, t?.clientY);
-        } else if (t) {
-            this.input.pointerDown(t.clientX, t.clientY, "left");
-            this.input.pointerUp(t.clientX, t.clientY);
+        if (this.input.dragLock) {
+            this.mode = "none";
+            return;
         }
+
+        if (this.input.pointer.anyDown) {
+            this.input.pointerUp(t?.clientX, t?.clientY);
+        } else if (t && now - this.lastTap < 280 && this.tapCount === 1) {
+            this.input.click(t.clientX, t.clientY, "left");
+        }
+
+        this.mode = "none";
+        this.dragLockPending = false;
     }
 }

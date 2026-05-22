@@ -1,3 +1,20 @@
+# Progress — 2026-05-21 18:41 (fast connect + Citrix UX)
+
+## Completed
+- **Fast connect**: `fast-connect.js` — 8s budget; recovery/watchdogs only after first frame (`video-recovery.js` `armWatchdogs`)
+- **ICE discipline**: no restart when DTLS connected; reconnect after 10s failed/disconnected (`connection-manager.js`)
+- **Startup quality**: `startup_mobile` preset (640×360, 8fps, 550k) → ramp via `quality-controller.js`
+- **Pointer**: `pointer-controller.js` — persistent down/move/up, drag lock, right-click
+- **Gestures**: tap/double-tap-hold lock, 2-finger scroll + tap right-click, pinch zoom (`gestures.js`, `viewport-controller.js`, `scroll-engine.js`)
+- **Keyboard**: `#hidden-text` textarea bridge + clipboard paste (`keyboard-bridge.js`)
+- **Toolbar**: floating translucent dock, auto-hide, clipboard/right-click/reconnect buttons
+
+## Test (iPhone Safari)
+1. Tap to Connect → first frame should hide splash within ~10s
+2. Drag window (trackpad + hold), double-tap-hold drag lock
+3. Two-finger scroll; two-finger tap right-click
+4. Pinch zoom; paste via toolbar or ⌘V in keyboard field
+
 # Progress — 2026-05-21 (video recovery)
 
 ## Safari video freeze recovery

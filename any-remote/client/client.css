@@ -189,7 +189,6 @@ body.touch-trackpad .virtual-cursor { display: block; }
     bottom: 0;
     z-index: 30;
     padding-bottom: env(safe-area-inset-bottom);
-    background: linear-gradient(transparent, rgba(12, 14, 18, 0.85));
     pointer-events: none;
 }
 .mobile-toolbar.hidden { display: none; }
@@ -209,13 +208,23 @@ body.touch-trackpad .virtual-cursor { display: block; }
     pointer-events: auto;
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 8px;
     justify-content: center;
-    padding: 8px 10px 12px;
-    background: rgba(22, 27, 34, 0.88);
-    backdrop-filter: blur(12px);
-    border-top: 1px solid #30363d;
-    transition: transform 0.2s ease, opacity 0.2s;
+    align-items: center;
+    margin: 0 10px 10px;
+    padding: 10px 12px;
+    border-radius: 16px;
+    background: rgba(22, 27, 34, 0.72);
+    backdrop-filter: blur(14px) saturate(1.2);
+    border: 1px solid rgba(48, 54, 61, 0.65);
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+    transition: transform 0.25s ease, opacity 0.25s;
+}
+.m-bar-inner button,
+.m-bar-inner select {
+    min-height: 40px;
+    min-width: 40px;
+    touch-action: manipulation;
 }
 .mobile-toolbar.collapsed .m-bar-inner {
     transform: translateY(110%);
@@ -225,13 +234,16 @@ body.touch-trackpad .virtual-cursor { display: block; }
 .m-sens { font-size: 10px; color: #8b949e; }
 .m-sens input { width: 64px; }
 
+.hidden-text,
 .hidden-input {
     position: fixed;
     left: -9999px;
     width: 1px;
     height: 1px;
     opacity: 0;
+    resize: none;
 }
+.hidden-text:not(.hidden),
 .hidden-input:not(.hidden) {
     left: 8px;
     bottom: calc(72px + env(safe-area-inset-bottom));

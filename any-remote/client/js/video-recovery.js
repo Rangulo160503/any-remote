@@ -43,8 +43,7 @@ export class VideoRecoveryMonitor {
         this.health = "idle";
         this._timer = null;
         this._rvfActive = false;
-        this._enabled = false;
-        this.graceUntil = 0;
+        this._armed = false;
         this._visibilityBound = false;
     }
 
@@ -133,14 +132,57 @@ export class VideoRecoveryMonitor {
             this.track.enabled = true;
             attachTrackToStableStream(this.track);
             bindStableStreamToVideo(this.video);
-            this.track.onunmute = () => this._renderRecover("unmute");
+            this.track.onunmute = () => {
+                if (this._armed) this._renderRecover("unmute");
+                else forcePlayVideo();
+            };
             this.track.onmute = () => console.warn("[any-remote] track muted");
         }
         configureLowLatencyReceiver(this.receiver);
         applyInlinePlaybackFlags(this.video);
         forcePlayVideo();
-        startAutoplayRetryLoop();
-        this._setHealth("ok");
+        this._setHealth("starting");
+        this._waitFirstFrame();
+    }
+
+    _waitFirstFrame() {
+        const v = this.video;
+        const check = () => {
+            if (this._armed) return;
+            const hasFrame =
+                v.videoWidth > 0 &&
+                v.videoHeight > 0 &&
+                v.readyState >= HAVE_CURRENT_DATA &&
+                !v.paused;
+            if (hasFrame) {
+                this._onFirstFrameReady();
+                return;
+            }
+            if (v.requestVideoFrameCallback) {
+                v.requestVideoFrameCallback(() => check());
+            } else {
+                requestAnimationFrame(check);
+            }
+        };
+        check();
+    }
+
+    _onFirstFrameReady() {
+        if (this._armed) return;
+        this.hooks.onFirstFrame?.();
+        this.armWatchdogs();
+    }
+
+    armWatchdogs() {
+        if (this._armed) return;
+        this._armed = true;
+        this._enabled = true;
+        this.lastAdvanceWallMs = Date.now();
+        this.graceUntil = Date.now() + 2000;
+        this._timer = setInterval(() => this._tick(), this.checkMs);
+        this._startFrameWatch();
+        this._bindVisibility();
+        console.log("[any-remote] recovery armed after first frame");
     }
 
     clearMedia() {
@@ -149,24 +191,18 @@ export class VideoRecoveryMonitor {
         this.receiver = null;
         this.track = null;
         this.lastCurrentTime = -1;
+        this._armed = false;
         detachStableFromVideo(this.video);
         this._setHealth("idle");
     }
 
     start() {
-        this.stop();
-        this._enabled = true;
-        this.lastAdvanceWallMs = Date.now();
-        this.graceUntil = Date.now() + (this.platform.isSafariMobile ? 5000 : 3000);
-        this._timer = setInterval(() => this._tick(), this.checkMs);
-        this._startFrameWatch();
-        this._bindVisibility();
-        startAutoplayRetryLoop();
-        console.log("[any-remote] Safari render monitor on");
+        /* Watchdogs arm via armWatchdogs() after first frame. */
     }
 
     stop() {
         this._enabled = false;
+        this._armed = false;
         if (this._timer) clearInterval(this._timer);
         this._timer = null;
         this._rvfActive = false;
@@ -200,7 +236,7 @@ export class VideoRecoveryMonitor {
     _startFrameWatch() {
         const v = this.video;
         const onFrame = (now) => {
-            if (!this._enabled) return;
+            if (!this._armed) return;
             this.fpsFrames++;
             this.framesDecoded++;
             const ct = v.currentTime;
@@ -226,7 +262,8 @@ export class VideoRecoveryMonitor {
     }
 
     _tick() {
-        if (!this._enabled || this.recovering || Date.now() < this.graceUntil) return;
+        if (this.hooks.inStartup?.()) return;
+        if (!this._armed || !this._enabled || this.recovering || Date.now() < this.graceUntil) return;
         const sample = this.sample();
         if (!sample) return;
         this._pushWatchdog(sample);
@@ -265,7 +302,7 @@ export class VideoRecoveryMonitor {
 
             await new Promise((r) => requestAnimationFrame(r));
             await forcePlayVideo();
-            startAutoplayRetryLoop();
+            if (this._armed) startAutoplayRetryLoop();
 
             if (this.hooks.requestKeyframe) this.hooks.requestKeyframe();
 
@@ -283,7 +320,10 @@ export class VideoRecoveryMonitor {
     }
 
     async onForeground() {
-        if (!this._enabled) return;
+        if (!this._armed) {
+            forcePlayVideo();
+            return;
+        }
         console.log("[any-remote] foreground render recover");
         await this._renderRecover("foreground");
     }

@@ -1,62 +1,96 @@
-/** Adaptive bitrate/FPS for mobile Safari. */
+/** Adaptive quality — startup profile, ramp-up, input-priority under load. */
 
 export class QualityController {
     constructor(platform, sendFn) {
         this.platform = platform;
         this.send = sendFn;
         this.mode = platform.mobile ? "mobile" : "balanced";
+        this.userMode = this.mode;
         this.lastAdapt = 0;
-        this.freezeCount = 0;
-        this.lastFps = 0;
+        this.stablePlayback = false;
+        this.rampStage = 0;
     }
 
     effectiveQuality(userMode) {
-        if (this.platform.isSafariMobile && userMode === "balanced") return "mobile";
-        return userMode;
+        this.userMode = userMode || this.userMode;
+        if (this.platform.mobile && !this.stablePlayback) {
+            return "startup_mobile";
+        }
+        if (this.platform.isSafariMobile && this.userMode === "balanced" && !this.stablePlayback) {
+            return "startup_mobile";
+        }
+        return this.userMode;
+    }
+
+    onFirstFrame() {
+        this.lastAdapt = 0;
+    }
+
+    onStableRamp() {
+        this.stablePlayback = true;
+        this.rampStage = 1;
     }
 
     onMeta(msg) {
-        if (msg.quality) this.mode = msg.quality;
+        if (msg.quality) {
+            this.mode = msg.quality;
+            this.userMode = msg.quality;
+        }
     }
 
     tick(hud, fps) {
         const now = Date.now();
-        if (fps <= 2 && this.lastFps > 5) this.freezeCount++;
-        else if (fps > 8) this.freezeCount = Math.max(0, this.freezeCount - 1);
-        this.lastFps = fps;
+        const loss = hud.data.packetLoss ?? 0;
+        const rtt = hud.data.rttMs ?? 0;
 
-        if (now - this.lastAdapt < 5000) return;
-
-        const loss = hud.data.packetLoss;
-        const rtt = hud.data.rttMs;
-        let bitrate = 850_000;
-        let targetFps = 10;
-        let mode = "mobile";
-
-        if (!this.platform.mobile) {
-            mode = this.mode === "mobile" ? "balanced" : this.mode;
-            if (mode === "high") bitrate = 4_000_000;
-            else if (mode === "ultra") bitrate = 6_000_000;
-            else bitrate = 2_500_000;
-            targetFps = 15;
-        } else {
-            if (loss != null && loss > 0.08) bitrate = 700_000;
-            if (rtt != null && rtt > 250) bitrate = Math.min(bitrate, 750_000);
-            if (this.freezeCount >= 3) {
-                bitrate = 650_000;
-                targetFps = 8;
-            }
+        if (loss > 0.12 || rtt > 280) {
+            this._sendAdapt("startup_mobile", 450_000, 8, loss, rtt, true);
+            this.lastAdapt = now;
+            return;
         }
 
+        if (now - this.lastAdapt < 4000) return;
+
+        let mode = this.userMode;
+        let bitrate = 550_000;
+        let targetFps = 8;
+
+        if (!this.platform.mobile) {
+            mode = this.userMode;
+            bitrate =
+                mode === "ultra" ? 6_000_000 : mode === "high" ? 4_000_000 : 2_500_000;
+            targetFps = 15;
+        } else if (!this.stablePlayback) {
+            mode = "startup_mobile";
+            bitrate = 550_000;
+            targetFps = 8;
+        } else if (this.rampStage === 1) {
+            mode = "mobile";
+            bitrate = 750_000;
+            targetFps = 10;
+            if (fps >= 8) this.rampStage = 2;
+        } else {
+            mode = this.userMode === "balanced" ? "mobile" : this.userMode;
+            bitrate = mode === "high" ? 1_200_000 : 900_000;
+            targetFps = 12;
+        }
+
+        this._sendAdapt(mode, bitrate, targetFps, loss, rtt, false);
         this.lastAdapt = now;
+    }
+
+    _sendAdapt(mode, bitrate, fps, loss, rtt, inputPriority) {
         this.send({
             t: "adapt",
             mode,
             bitrate,
-            fps: targetFps,
+            fps,
             packetLoss: loss,
             rtt,
+            inputPriority,
         });
-        console.log("[any-remote] adapt", mode, bitrate, targetFps, "loss", loss);
+        if (inputPriority) {
+            console.log("[any-remote] adapt input-priority", bitrate);
+        }
     }
 }
